@@ -1,0 +1,512 @@
+import sys
+import socket
+
+# 连接测试时用的端口范围，数量决定了同时开启的测试进程，好点的机器可以设大点
+port_range = range(9000, 9050)
+
+# 调用v2ray的路径
+if sys.platform == 'win32':
+     v2ray_path = 'D:/app/v2rayN-With-Core/bin/v2fly_v5/v2ray.exe'
+else:
+     v2ray_path = '/usr/local/bin/v2ray'
+
+# 调用hysteria的路径
+# 不支持win
+if sys.platform == 'win32':
+    hysteria_path = ''
+    hysteria2_path = ''
+else:
+    hysteria_path = '/usr/local/bin/hysteria-linux-arm64'
+    hysteria2_path = '/usr/local/bin/hysteria2-linux-arm64'
+
+# 在较慢的机器上，需要等待进程启动并连接远程的时间
+test_wait_seconds = 1
+
+# 获取节点列表时使用的代理，目前没有什么用
+#http_proxy =  'http://127.0.0.1:10809/'
+proxies = {'http://': 'http://127.0.0.1:10809/',
+           'https://': 'http://127.0.0.1:10809/'
+           }
+
+headers = {
+    #            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    #            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+    #            "Upgrade-Insecure-Requests": "1",
+    "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.78",
+}
+
+
+# 异步连接库请求时用的header
+headers = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+    "Upgrade-Insecure-Requests": "1",
+    "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.78",
+}
+
+# v2ray配置模板
+conf_tpl = {
+    "log": {
+      "access": "",
+      "error": "",
+      "loglevel": "warning"
+    },
+    "api": {
+      "tag": "api",
+      "services": [
+        "StatsService"
+      ]
+    },
+    "dns": {},
+    "routing": {
+      "domainStrategy": "IPIfNonMatch",
+      "domainMatcher": "linear",
+      "rules": [
+          {
+              "type": "field",
+              "inboundTag": [
+                        "api"
+              ],
+              "outboundTag": "api",
+              "enabled": True
+          },
+          {
+              "id": "4840270311056198635",
+              "type": "field",
+              "outboundTag": "direct",
+                    "domain": [
+                        "domain:bing.com",
+                        "domain:baidu.com"
+                    ],
+              "enabled": True
+            },
+          {
+              "id": "5572774766501182519",
+              "type": "field",
+              "outboundTag": "block",
+                    "domain": [
+                        "geosite:category-ads-all"
+                    ],
+              "enabled": True
+            },
+          {
+              "id": "5197249276552284053",
+              "type": "field",
+              "outboundTag": "direct",
+                    "domain": [
+                        "geosite:cn"
+                    ],
+              "enabled": True
+            },
+          {
+              "id": "5037349541415266138",
+              "type": "field",
+              "outboundTag": "direct",
+                    "ip": [
+                        "geoip:private",
+                        "geoip:cn"
+                    ],
+              "enabled": True
+            },
+          {
+              "id": "5125704558895554114",
+              "type": "field",
+              "port": "0-65535",
+                    "outboundTag": "proxy",
+                    "enabled": True
+            }
+      ]
+    },
+    "policy": {
+      "system": {
+          "statsOutboundUplink": False,
+          "statsOutboundDownlink": False
+      }
+    },
+    "inbounds": {},
+    "outbounds": {},
+    "transport": {},
+    "stats": {},
+}
+
+def getLanIp():
+    """ 
+    这个方法是目前见过最优雅获取本机服务器的IP方法了。没有任何的依赖，也没有去猜测机器上的网络设备信息。
+    而且是利用 UDP 协议来实现的，生成一个UDP包，把自己的 IP 放如到 UDP 协议头中，然后从UDP包中获取本机的IP。
+    这个方法并不会真实的向外部发包，所以用抓包工具是看不到的。但是会申请一个 UDP 的端口，所以如果经常调用也会比较耗时的，这里如果需要可以将查询到的IP给缓存起来，性能可以获得很大提升。
+            作者：钟翦
+            链接：https://www.zhihu.com/question/49036683/answer/1243217025
+            来源：知乎
+            著作权归作者所有。商业转载请联系作者获得授权，非商业转载请注明出处。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(('8.8.8.8', 80))
+    return s.getsockname()[0]
+
+# 正式建立代理时使用的配置，做连通性测试时不使用这个
+proxy_host = getLanIp()
+print(f'{proxy_host=}')
+proxy_port = 8076
+proxy_user = "xxx"
+proxy_pass = "xxx"
+
+
+# v2ray配置文件落地时的路径
+if sys.platform == 'win32':
+    conf_basepath = 'd:/'
+else:
+    conf_basepath = '/dev/shm/'  # 这个是内存映射文件系统，实际上不落磁盘
+
+# 节点配置之入口配置
+inboundsSetting = [
+    {
+        "listen": None,
+        "port": None,
+        "protocol": "http",
+        "settings": {
+            "accounts": [
+                    {
+                        "user": None,
+                        "pass": None
+                    }
+            ],
+            "udp": True,
+            "allowTransparent": False
+        },
+        "streamSettings": {},
+#        "3tag": "http",
+        "sniffing": {
+                "enabled": False,
+                "destOverride": [
+                    "http",
+                    "tls"
+                ],
+            "routeOnly": False,
+#            "metadataOnly": False
+        },
+#        "allocate": {
+#            "strategy": "always",
+#            "refresh": 5,
+#            "concurrency": 3
+#        }
+    },
+
+    {
+      'tag': 'socks',
+      'port': 10808,
+      'listen': '127.0.0.1',
+      'protocol': 'socks',
+      'sniffing': {
+        'enabled': False,
+        'destOverride': [
+          'http',
+          'tls'
+        ],
+        'routeOnly': False
+      },
+      'settings': {
+        'auth': 'noauth',
+        'udp': True,
+        'allowTransparent': False
+      }
+    }
+]
+
+
+# 节点配置之出口配置 vmess
+outboundsSetting_vmess = [
+    {
+      "tag": "proxy",
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": None,
+            "port": None,
+            "users": [
+              {
+                "id": None,
+                "alterId": 0,
+                "email": "t@t.tt",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": None,
+        "tlsSettings": {
+          "allowInsecure": False,
+          "show": False
+        },
+        "wsSettings": {
+          "path": None,
+          "headers": {}
+        }
+      },
+      "mux": {
+        "enabled": False,
+        "concurrency": -1
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {}
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole",
+      "settings": {
+        "response": {
+          "type": "http"
+        }
+      }
+    }
+]
+
+
+# 节点配置之出口配置 ss
+outboundsSetting_ss = [
+    {
+        "tag": "proxy",
+        "protocol": "shadowsocks",
+        "settings": {
+            "servers": [
+              {
+                "address": None,
+                "method": None,
+                "ota": False,
+                "password": None,
+                "port": None,
+                "level": 1
+              }
+            ]
+          },
+        "streamSettings": {
+            "network": "tcp"
+          },
+        "mux": {
+            "enabled": False,
+            "concurrency": -1
+          }
+    },
+    {
+        "tag": "direct",
+        "protocol": "freedom",
+        "settings": {}
+    },
+    {
+        "tag": "block",
+        "protocol": "blackhole",
+        "settings": {
+            "response": {
+              "type": "http"
+            }
+          }
+    }
+]
+
+
+# 节点配置之出口配置 trojan
+outboundsSetting_trojan = [
+    {
+        "tag": "proxy",
+        "protocol": "trojan",
+        "settings": {
+            "servers": [
+              {
+                "method": "chacha20",
+                "address": None,
+                "port": None,
+                "password": None,
+                "ota": False,
+                "level": 1
+              }
+            ]
+          },
+        "streamSettings": {
+            "network": "tcp",
+            "security": "tls",
+            "tlsSettings": {
+              "allowInsecure": False,
+              "show": False
+            }
+
+          },
+        "mux": {
+            "enabled": False,
+            "concurrency": -1
+          }
+    },
+    {
+        "tag": "direct",
+        "protocol": "freedom",
+        "settings": {}
+    },
+    {
+        "tag": "block",
+        "protocol": "blackhole",
+        "settings": {
+            "response": {
+              "type": "http"
+            }
+          }
+    }
+]
+
+
+# 节点配置之出口配置 vless
+outboundsSetting_vless = [
+    {
+      "tag": "proxy",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": None,
+            "port": None,
+            "users": [
+              {
+                "id": None,
+                "alterId": None,
+                "email": None,
+                "security": "auto",
+                "encryption": "",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": None,
+        "security": None,
+        "tlsSettings": {
+          "allowInsecure": False,
+          "serverName": None,
+          "show": False
+        },
+        "wsSettings": {
+          "path": None,
+          "headers": {
+              "Host": "",
+              }
+        },
+        "realitySettings": {
+          "serverName": "",
+          "fingerprint": "",
+          "show": False,
+          "publicKey": "",
+          "shortId": "",
+          "spiderX": ""
+        }
+      },
+      "mux": {
+        "enabled": False,
+        "concurrency": -1
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {}
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole",
+      "settings": {
+        "response": {
+          "type": "http"
+        }
+      }
+    }
+  ]
+
+
+# hysteria v1的配置 https://v1.hysteria.network/docs/advanced-usage/
+settingHysteria = {
+    'server': None,
+    'server_name': None,
+    'auth_str': None,
+    "insecure": True,
+    "protocol": "udp",
+    'alpn': None,
+    'disable_mtu_discovery': None,
+    'up_mbps': None,
+    'down_mbps': None,
+    'fast_open': None,
+    'hop_interval': None,
+    'lazy_start': False,
+    'obfs': None,
+    'retry': 2,
+
+    'socks5': {
+        'listen': '127.0.0.1:10808',
+        'timeout': 300,
+        'disable_udp': False,
+        'user': None,
+        'password': None,
+        },
+    'http': {
+        'listen': None,
+        'user': None,
+        'password': None,
+        },
+    "resolver": "udp://1.1.1.1:53",
+    "resolve_preference": "4",
+#    "ca": "/usr/local/bin/hysteria.ca.crt",  # https://v1.hysteria.network/docs/custom-ca/
+}
+
+
+# hysteria v2的配置 https://v2.hysteria.network/zh/docs/advanced/Full-Client-Config/
+settingHysteria2 = {
+    'server': None,
+    'server_name': '',
+    'auth': None,
+    'tls': {
+        'sni': None,
+        'insecure': True,
+        },
+#-#    "quic": {
+#-#        'initStreamReceiveWindow': 16777216,
+#-#        'maxStreamReceiveWindow': 16777216,
+#-#        'initConnReceiveWindow': 33554432,
+#-#        'maxConnReceiveWindow': 33554432
+#-#        },
+    'bandwidth': {
+# #        'up': '30 mbps',
+# #        'down': '50 mbps',
+        },
+    'quic': {
+        },
+    'transport': {
+        'type': 'udp',
+        'udp': {
+            'hopInterval': 10,
+            }
+        },
+    'http': {
+        'listen': None,
+        'username': None,
+        'password': None,
+        'realm': None,
+        },
+    'socks5': {
+        'disableUDP': False,
+        'listen': '127.0.0.1:10808'
+        },
+    'obfs': {
+        'type': 'salamander',
+        'salamander': {
+            'password': None,
+            }
+        },
+    'fastOpen': True,
+    'lazy': False,
+}
+
