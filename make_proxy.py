@@ -28,6 +28,8 @@
 # 20231115 测试hysteriav2
 # 20231116 wanshanziwo.eu.org下线，注释掉相关代码, 添加函数b64d以统一添加补全功能，do_newvless正式取代do_vless
 # 20231117 因为aiohttp通过hysteria2代理访问网站时会报错(orangepi上测试)，换用httpx做链接测试; 减少重试次数以加快代理寻找过程；使用异步worker加快代理测试
+# 20231121 代理开启本地无密码socks5 10808端口服务，方便测试和git使用
+# 20231122 优化：启动节点时马上进行测试，避免失效节点在初次启动时不能马上被排除
 
 import binascii
 from base64 import b64decode, b64encode
@@ -255,7 +257,7 @@ class LaunchProxyMix(object):
         nc = NodeConfig()
         settings = nc.genConfig[node.proto](node)
         if test_mode == True:
-            settings['inbounds'].pop()  # 删除https
+            settings['inbounds'].pop()  # 删除socks
             settings['inbounds'][0]['listen'] = '127.0.0.1'
             settings['inbounds'][0]['port'] = port
             settings['inbounds'][0]['settings']['auth'] = 'noauth'
@@ -452,7 +454,7 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
                 except (httpx.ConnectTimeout, httpx.ReadTimeout) as e:
                     if self.nr_try - i - 1 + nr_succ < self.nr_min_succ:
                         break
-                except (ssl.SSLError, ssl.SSLZeroReturnError, httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
+                except (ssl.SSLError, ssl.SSLZeroReturnError, httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.ProxyError) as e:
                     break  # 提前退出
                 except ConnectionAbortedError as e:
                     debug(f'{node} not available: ConnectionAbortedError {e}')
@@ -627,21 +629,23 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
         score = self._init_score()
         nr_succ = 0
         url = random.choice(self.urls)
-        client = httpx.AsyncClient(timeout=self.timeout, proxies=f'http://{quote(proxy_user)}:{quote(proxy_pass)}@{proxy_host}:{proxy_port}')
+
+        # https://github.com/encode/httpx/discussions/2350  httpx.URL() does not parse url correctly with curly brackets in password
+        p = httpx.Proxy(httpx.URL(f'http://{proxy_host}:{proxy_port}/', username=proxy_user, password=proxy_pass))
+# #        client = httpx.AsyncClient(timeout=self.timeout, proxies=f'http://{quote(proxy_user)}:{quote(proxy_pass)}@{proxy_host}:{proxy_port}')
+
+        ssl_context = httpx.create_ssl_context()
+        ssl_context.options ^= ssl.OP_NO_TLSv1  # Enable TLS 1.0 back
+        client = httpx.AsyncClient(timeout=self.timeout, proxies=p, verify=ssl_context)
+# #        client = httpx.AsyncClient(timeout=self.timeout, proxies=p)
         for i in range(self.nr_try):
             try:
                 begin = time()
-# #                resp = await self.client.head(url=url, timeout=self.timeout, proxy=f'http://{proxy_host}:{proxy_port}', proxy_auth=proxy_auth)
-# #                body = await resp.text()
                 resp = await client.head(url)
-                body = resp.text
-
-                finish = time()
-                length = len(body or '')
+                latency = int((time() - begin) * 1000)
                 nr_succ += 1
-                latency = int((finish - begin) * 1000)
                 #debug(f'{node} times: {i + 1} score:{latency}ms')
-                score = self._score(latency, length, score)
+                score = self._score(latency, 0, score)
                 if nr_succ >= self.nr_min_succ:  # 达到阈值提前退出
                     break
             except Exception as e:
@@ -1589,7 +1593,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         while 1:
             if alt_node:  # and time() - start < 3600 * 12:
                 cur_node = alt_node.pop(0)
-                debug(f'to use alt_node {cur_node}, left {len(alt_node)}')
+                debug(f'use alt_node {cur_node}, left {len(alt_node)}')
             else:
                 cur_node = None
                 del alt_node[:]
@@ -1638,43 +1642,31 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             if sys.platform != 'win32' and cur_node:
                 p, filepath = await self.launch_proxy(cur_node)
                 info(f'service started, pid={p.pid}')
-                at = ProxyTest(nr_try=3, min_resp_count=2, interval=8, timeout=5)
+                at = ProxyTest(nr_try=2, min_resp_count=2, interval=8, timeout=5)
                 proxy_auth = aiohttp.BasicAuth(proxy_user, proxy_pass)
 # #                last_date = None
                 while 1:
-                    l_task = [asyncio.create_task(event_exit.wait()), asyncio.create_task(p.wait()), asyncio.create_task(asyncio.sleep(180))]
-                    e_exit, p_exit, timeout = l_task
-                    done, _ = await asyncio.wait(l_task, return_when=asyncio.FIRST_COMPLETED)
-                    if timeout in done:
-# #                        now = datetime.now()
-# #                        if last_date is None:
-# #                            last_date = now
-# #                        if now.day != last_date.day:  # 跨天
-# #                            info(f'new day, need pick new one')
-# #                            break
-# #                        if last_date.hour < 16 and now.hour >= 16:  # 过16点
-# #                            info(f'noon, need pick new one')
-# #                            break
-# #                        if last_date.hour < 8 and now.hour >= 8:  # 过8点了
-# #                            info(f'8 am, need pick new one')
-# #                            break
-# #                        last_date = now
-                        #debug(f'check node avaliable ...')
-                        ping, nr_succ = await at._http_connect(cur_node, proxy_auth=proxy_auth)
-                        #debug(f'check avaliable got {ping=} {nr_succ=}')
-                        if ping >= 9999999 or nr_succ < at.nr_min_succ:
-                            info(f'node invaliable, choose new one')
-                            break
-                        else:
-                            #info(f'wait for next check ...')
-                            print(f'{datetime.now().strftime("%H:%M:%S ")}', end='', file=sys.stderr, flush=True)
+                    #debug(f'check node avaliable ...')
+                    ping, nr_succ = await at._http_connect(cur_node, proxy_auth=proxy_auth)
+                    #debug(f'check avaliable got {ping=} {nr_succ=}')
+                    if ping >= 9999999 or nr_succ < at.nr_min_succ:
+                        info(f'node invaliable, choose new one')
+                        break
+                    else:
+                        #info(f'wait for next check ...')
+                        print(f'{datetime.now().strftime("%H:%M:%S ")}', end='', file=sys.stderr, flush=True)
+
+                        l_task = [asyncio.create_task(event_exit.wait()), asyncio.create_task(p.wait()), asyncio.create_task(asyncio.sleep(180))]
+                        e_exit, p_exit, timeout = l_task
+                        done, _ = await asyncio.wait(l_task, return_when=asyncio.FIRST_COMPLETED)
+                        if timeout in done:
                             continue
-                    elif e_exit in done:
-                        info(f'got exit flag, exit')
-                        break
-                    elif p_exit in done:
-                        warn(f'proxy killed? to pick new one...')
-                        break
+                        elif e_exit in done:
+                            info(f'got exit flag, exit')
+                            break
+                        elif p_exit in done:
+                            warn(f'proxy killed? to pick new one...')
+                            break
 
                 try:
                     p.kill()
