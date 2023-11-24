@@ -30,6 +30,7 @@
 # 20231117 因为aiohttp通过hysteria2代理访问网站时会报错(orangepi上测试)，换用httpx做链接测试; 减少重试次数以加快代理寻找过程；使用异步worker加快代理测试
 # 20231121 代理开启本地无密码socks5 10808端口服务，方便测试和git使用
 # 20231122 优化：启动节点时马上进行测试，避免失效节点在初次启动时不能马上被排除
+# 20231124 raw.fastgit.org替换gh-proxy.com
 
 import binascii
 from base64 import b64decode, b64encode
@@ -162,7 +163,7 @@ def preexec_ignore_sigint():
     os.setpgrp()  # 建立单独的进程组，避免父进程的ctrl+c传递进来
 
 
-def b64d(s) -> str|None:
+def b64d(s: str, url: str='') -> str|None:
     '''解码base64
     支持添加'='来重试
     '''
@@ -181,7 +182,7 @@ def b64d(s) -> str|None:
     if isinstance(rslt, bytes):
         rslt = rslt.decode()
     if rslt is None:
-        debug(f'decode failed for {s=}')
+        debug(f'decode failed {url=} s[:100]={s[:100]}')
     return rslt
 
 
@@ -329,7 +330,7 @@ class LaunchProxyMix(object):
             filepath = PurePath(conf_basepath, f"{node.proto}_{hash(node)}_{node.ip}.json").as_posix()
             with open(filepath, 'w') as fo:
                 fo.write(jsonpickle.dumps(settings, indent=2))
-            debug(f'conf file saved. {filepath}')
+# #            debug(f'conf file saved. {filepath}')
 
             args = shlex.split(f'{hysteria2_path} client --disable-update-check -c {filepath}')
             p = await asyncio.create_subprocess_exec(*args, stdin=None, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -485,8 +486,8 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
                 pass
             try:
                 if os.path.exists(config_path):
-                    if not PurePath(config_path).name.startswith('hysteria2'):
-                        os.remove(config_path)
+# #                    if not PurePath(config_path).name.startswith('hysteria2'):
+                    os.remove(config_path)
                     pass  # debug only
             except:
                 pass
@@ -549,81 +550,13 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
                 pass
             try:
                 if os.path.exists(config_path):
-                    if not PurePath(config_path).name.startswith('hysteria2'):
-                        os.remove(config_path)
-                    pass  # debug only
+# #                    if not PurePath(config_path).name.startswith('hysteria2'):
+                    os.remove(config_path)
             except:
                 pass
 
         return score, nr_succ
 
-#-#    async def _popen_connect(self, node: Node, port: int) -> tuple[int, int]:
-#-#        score = self._init_score()
-#-#        nr_succ = 0
-#-#
-#-#        p, config_path = await self.launch_proxy(node, True, port)
-#-#        url = random.choice(self.urls)
-#-#        try:
-#-#            for i in range(self.nr_try):
-#-#                try:
-#-#                    begin = time()
-#-#                    resp = await self.client.head(url=url, timeout=self.timeout, proxy=f'http://127.0.0.1:{port}')
-#-#                    finish = time()
-#-## #                    body = await resp.read()
-#-#
-#-## #                    length = len(body or '')
-#-#                    length = 0
-#-#                    nr_succ += 1
-#-#                    latency = int((finish - begin) * 1000)
-#-#                    #debug(f'{node} times: {i + 1} score:{latency}ms response: {length} bytes')
-#-#                    score = self._score(latency, length, score)
-#-#                    if nr_succ >= self.nr_min_succ:  # 达到阈值提前退出
-#-#                        break
-#-#                except (httpx.ConnectTimeout, httpx.ReadTimeout) as e:
-#-#                    if self.nr_try - i - 1 + nr_succ < self.nr_min_succ:
-#-#                        break
-#-#                except (ssl.SSLError, ssl.SSLZeroReturnError, httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
-#-#                    break  # 提前退出
-#-#                except aiohttp.ClientConnectionError as e:
-#-## #                    debug(f'{node} not available: ClientConnectionError {e=}')
-#-##                    mylogger.opt(exception=True).error(f'got error {url}', diagnose=False, backtrace=False)
-#-#                    break  # 提前退出
-#-#                except ConnectionAbortedError as e:
-#-#                    debug(f'{node} not available: ConnectionAbortedError {e}')
-#-#                    break  # 提前退出
-#-#                except ConnectionRefusedError as e:
-#-#                    debug(f'{node} not available: ConnectionRefusedError {e}')
-#-#                    break  # 提前退出
-#-#                except ConnectionResetError as e:
-#-#                    debug(f'{node} not available: ConnectionResetError {e}')
-#-#                    break  # 提前退出
-#-#                except asyncio.TimeoutError as e:
-#-#                    #debug(f'{node} timeout')
-#-#                    if self.nr_try - i - 1 + nr_succ < self.nr_min_succ:
-#-#                        break
-#-#                except BaseException as e:
-#-#                    debug(f'{node} available test failed: {str(e)} {type(e)}')
-#-#                    if self.nr_try - i - 1 + nr_succ < self.nr_min_succ:
-#-#                        break
-#-#                await asyncio.sleep(self.interval)
-#-#        finally:
-#-#            try:
-#-#                p.kill()
-#-#            except ProcessLookupError:
-#-#                pass
-#-#            try:
-#-#                await p.communicate()
-#-#            except ProcessLookupError:
-#-#                pass
-#-#            try:
-#-#                if os.path.exists(config_path):
-#-#                    if not PurePath(config_path).name.startswith('hysteria2'):
-#-#                        os.remove(config_path)
-#-#                    pass  # debug only
-#-#            except:
-#-#                pass
-#-#
-#-#        return score, nr_succ
 
     async def _http_connect(self, node: Node, proxy_auth: aiohttp.BasicAuth|None = None) -> tuple[int, int]:
         score = self._init_score()
@@ -634,9 +567,7 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
         p = httpx.Proxy(httpx.URL(f'http://{proxy_host}:{proxy_port}/', username=proxy_user, password=proxy_pass))
 # #        client = httpx.AsyncClient(timeout=self.timeout, proxies=f'http://{quote(proxy_user)}:{quote(proxy_pass)}@{proxy_host}:{proxy_port}')
 
-        ssl_context = httpx.create_ssl_context()
-        ssl_context.options ^= ssl.OP_NO_TLSv1  # Enable TLS 1.0 back
-        client = httpx.AsyncClient(timeout=self.timeout, proxies=p, verify=ssl_context)
+        client = httpx.AsyncClient(headers=headers, verify=False, timeout=self.timeout, proxies=p)
 # #        client = httpx.AsyncClient(timeout=self.timeout, proxies=p)
         for i in range(self.nr_try):
             try:
@@ -726,7 +657,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 #                        r = await self.client.get(url, timeout=10, proxy=proxies['http://'], ssl=False)
 #                    else:
 #                        r = await self.client.get(url, timeout=10, ssl=False)
-                    r = await self.client.get(url, timeout=10, ssl=False)
+                    r = await self.client.get(url, timeout=10, ssl=True)
                     async with r:
                         if r.status == 200:
                             content = await r.text()
@@ -758,7 +689,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             _proto = m.scheme
             match _proto:
                 case 'vmess':  # json(key: <id><add><path><port><host><aid><tls><ps>)
-                    tmp = b64d(m.netloc + m.path)
+                    tmp = b64d(m.netloc + m.path, url)
                     try:
                         _param = json.loads(tmp)
                     except Exception as e:
@@ -803,7 +734,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             warn(f'skip one ss node cause got ValueError: {e} {_ip_port=} {_node=} {url=}')
                             continue
                         if _tmp.count('-') != 4:
-                            _uuid = b64d(_tmp)
+                            _uuid = b64d(_tmp, url)
                             _uuid = _uuid.decode() if type(_uuid) is bytes else _uuid
                             if not _uuid:
                                 debug(f'_uuid no need decode, {_node=} {url=}')
@@ -971,7 +902,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
     async def _tmp_tolinkshare(self) -> list[Node]:
         l_node = []
-        url = 'https://gh-proxy.com/https://raw.githubusercontent.com/tolinkshare/freenode/main/README.md'
+        url = 'https://raw.fastgit.org/tolinkshare/freenode/main/README.md'
         content = await self._getNodeData(url)
         if content:
             l = re.findall('```(.+?)```', content, re.U|re.M|re.S)
@@ -985,7 +916,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
     async def _tmp_vpnnet(self) -> list[Node]:
         l_node = []
-        url = 'https://gh-proxy.com/https://raw.githubusercontent.com/VpnNetwork01/vpn-net/main/README.md'
+        url = 'https://raw.fastgit.org/VpnNetwork01/vpn-net/main/README.md'
         content = await self._getNodeData(url)
         if content:
             l = re.findall('```(.+?)```', content, re.U|re.M|re.S)
@@ -1059,7 +990,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 
 
         # 特殊处理
-        if url.startswith('https://gh-proxy.com/https://github.com/w1770946466/Auto_proxy/blob/b67f3edf71b6d7d885f4f7fe1ae32aa21ae5a37b/sub/'):
+        if url.startswith('https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/'):
             debug(f'特殊处理w1770946466')
             l_new = []
             for _line in r.split('\n'):
@@ -1108,7 +1039,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
 
         # 特殊处理
-        if url == 'https://gh-proxy.com/https://github.com/Rokate/Proxy-Sub/blob/main/clash/clash_v2ray.yml':
+        if url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml':
             full_content = yaml.load(r, yaml.FullLoader)
             proxies = full_content.get('proxies')
             l_node = []
@@ -1183,16 +1114,17 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             debug(f'got {len(l_node)} record(s) from {url}')
             return l_node
 
-        ls = b64d(r).split('\n')
-        if not ls:
-            error(f'decode failed for {data}')
+        s = b64d(r, url)
+        if not s:
+            error(f'decode failed {url} for {r[:100]}')
             return []
+        ls = s.split('\n')
 
         try:
             l_tmp = (x for x in ls if x)
 
             # 特殊处理
-            if url == 'https://gh-proxy.com/https://raw.githubusercontent.com/learnhard-cn/free_proxy_ss/main/free':
+            if url == 'https://raw.fastgit.org/learnhard-cn/free_proxy_ss/main/free':
                 debug(f'特殊处理 {url=}')
                 _l_n = []
                 for _x in l_tmp:
@@ -1228,7 +1160,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 #debug(f'now {l_tmp=}')
 
             # 特殊处理
-            if url == 'https://gh-proxy.com/https://raw.githubusercontent.com/eycorsican/rule-sets/master/kitsunebi_sub':
+            if url == 'https://raw.fastgit.org/eycorsican/rule-sets/master/kitsunebi_sub':
                 l_new = []
 #                debug(f'try to process special format node, {url=}')
                 for _x in l_tmp:
@@ -1256,7 +1188,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
 
             # 特殊处理
-            if url == 'https://gh-proxy.com/https://raw.githubusercontent.com/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg':
+            if url == 'https://raw.fastgit.org/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg':
                 l_new = []
                 debug(f'try to process special format node, {url=}')
                 for _x in l_tmp:
@@ -1305,7 +1237,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 l_url = qs['url'][0]
                 l_tmp = l_url.split('|') or []
             else:  # 尝试加=解码
-                l_tmp = (x for x in b64d(r).split('\n') if x) if r else []
+                l_tmp = (x for x in b64d(r, url).split('\n') if x) if r else []
         except BaseException as e:
             error(f'got error {e=}')
             raise e
@@ -1475,12 +1407,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             f'https://freeclash.org/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%m%d")}.txt',
             f'https://freeclash.org/wp-content/uploads/{today.year}/{today.month:02d}/{today.strftime("%m%d")}.txt',
 
-            'https://gh-proxy.com/https://raw.githubusercontent.com/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
+            'https://raw.fastgit.org/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
 
             'https://raw.fastgit.org/freefq/free/master/v2',
             #'https://raw.githubusercontent.com/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
-            'https://gh-proxy.com/https://raw.githubusercontent.com/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
-            'https://gh-proxy.com/https://raw.githubusercontent.com/ts-sf/fly/main/v2',
+# #            'https://raw.fastgit.org/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
+            'https://raw.fastgit.org/ts-sf/fly/main/v2',
             'https://raw.fastgit.org/ts-sf/fly/main/v2',
             ##'https://raw.fgit.ml/ts-sf/fly/main/v2', 
             'https://cdn.jsdelivr.net/gh/ermaozi01/free_clash_vpn/subscribe/v2ray.txt',
@@ -1488,22 +1420,22 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/v2',
             #'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/ss',
             'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/tr',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt',
-            #'https://gh-proxy.com/https://raw.githubusercontent.com/Lewis-1217/FreeNodes/main/bpjzx1',
-            #'https://gh-proxy.com/https://raw.githubusercontent.com/Lewis-1217/FreeNodes/main/bpjzx2',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/a2470982985/getNode/main/v2ray.txt',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/ermaozi01/free_clash_vpn/main/subscribe/v2ray.txt',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/ripaojiedian/freenode/main/sub',
+            'https://raw.fastgit.org/peasoft/NoMoreWalls/master/list.txt',
+            #'https://raw.fastgit.org/Lewis-1217/FreeNodes/main/bpjzx1',
+            #'https://raw.fastgit.org/Lewis-1217/FreeNodes/main/bpjzx2',
+            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',
+            'https://raw.fastgit.org/ermaozi01/free_clash_vpn/main/subscribe/v2ray.txt',
+            'https://raw.fastgit.org/ripaojiedian/freenode/main/sub',
 
             #'https://gh-proxy.com//raw.githubusercontent.com/yaney01/Yaney01/main/yaney_01',
-            #'https://gh-proxy.com/https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/learnhard-cn/free_proxy_ss/main/free',
-            'https://gh-proxy.com/https://github.com/Rokate/Proxy-Sub/blob/main/clash/clash_v2ray.yml',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/ZywChannel/free/main/sub',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/free18/v2ray/main/v2ray.txt',
+            #'https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt',
+            'https://raw.fastgit.org/learnhard-cn/free_proxy_ss/main/free',
+            'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml',
+            'https://raw.fastgit.org/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',
+            'https://raw.fastgit.org/ZywChannel/free/main/sub',
+            'https://raw.fastgit.org/free18/v2ray/main/v2ray.txt',
             #'https://sub.nicevpn.top/Clash.yaml',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray',
+            'https://raw.fastgit.org/mfuu/v2ray/master/v2ray',
 
            f'https://onenode.cc/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%Y%m%d")}.txt',
            f'https://onenode.cc/wp-content/uploads/{today.year}/{today.month:02d}/{today.strftime("%Y%m%d")}.txt',
@@ -1513,18 +1445,18 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             # https://github.com/Helpsoftware/fanqiang
             'https://jiang.netlify.com/',
             'https://youlianboshi.netlify.app/',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/eycorsican/rule-sets/master/kitsunebi_sub',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
+            'https://raw.fastgit.org/eycorsican/rule-sets/master/kitsunebi_sub',
+            'https://raw.fastgit.org/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
 
-            'https://gh-proxy.com/https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription_num',
-            'https://gh-proxy.com/https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity',
-            f'https://gh-proxy.com/https://github.com/w1770946466/Auto_proxy/blob/b67f3edf71b6d7d885f4f7fe1ae32aa21ae5a37b/sub/{beforeyesterday.strftime("%y%m")}/{beforeyesterday.strftime("%y%m%d")}.txt',
-            f'https://gh-proxy.com/https://github.com/w1770946466/Auto_proxy/blob/b67f3edf71b6d7d885f4f7fe1ae32aa21ae5a37b/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
-            f'https://gh-proxy.com/https://github.com/w1770946466/Auto_proxy/blob/b67f3edf71b6d7d885f4f7fe1ae32aa21ae5a37b/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
+            'https://raw.fastgit.org/w1770946466/Auto_proxy/main/Long_term_subscription_num',
+            'https://raw.fastgit.org/mahdibland/ShadowsocksAggregator/master/Eternity',
+            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{beforeyesterday.strftime("%y%m")}/{beforeyesterday.strftime("%y%m%d")}.txt',
+            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
+            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
              'https://mareep.netlify.app/sub/merged_proxies_new.yaml',  # https://github.com/vveg26/chromego_merge
-            'https://raw.githubusercontent.com/a2470982985/getNode/main/v2ray.txt',  # https://github.com/Flik6/getNode
+            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',  # https://github.com/Flik6/getNode
         ]
-        #l_source = ['https://gh-proxy.com/https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
+        #l_source = ['https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
         #l_source = l_source[:5]+ l_source[-5:]  # debug only
 
         return l_source
@@ -1532,7 +1464,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
     async def _getNodeList(self, from_source: bool=False) -> list[Node]:
         l_source = await self._getNodeUrl()
-# #        l_source = ['https://gh-proxy.com/https://raw.githubusercontent.com/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',] # debug only
+# #        l_source = ['https://raw.fastgit.org/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',] # debug only
         l_rslt = await asyncio.gather(*[self._parseNodeData(x) for x in l_source])
         l_rslt.append(await self._tmp_freevpnx())
         l_rslt.append(await self._tmp_ssfree())
@@ -1540,6 +1472,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         l_rslt.append(await self._tmp_vpnnet())
         l_rslt.append(self.__class__._parseProto(['hysteria2://sharecentrepro@ushy2.sharecentre.online:4433?peer=ushy2.sharecentre.online&obfs=none#hy2%EF%BD%9CTEST',], 'test'))
         l_node = list(chain.from_iterable(l_rslt))
+
+# #        event_exit.set()  # debug only
 
 #        l_node = list(filter(lambda x: x.proto=='hysteria', l_node))  # debug only
         if event_exit.is_set():
@@ -1642,7 +1576,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             if sys.platform != 'win32' and cur_node:
                 p, filepath = await self.launch_proxy(cur_node)
                 info(f'service started, pid={p.pid}')
-                at = ProxyTest(nr_try=2, min_resp_count=2, interval=8, timeout=5)
+                at = ProxyTest(nr_try=2, min_resp_count=1, interval=8, timeout=7)
                 proxy_auth = aiohttp.BasicAuth(proxy_user, proxy_pass)
 # #                last_date = None
                 while 1:
@@ -1678,8 +1612,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     pass
 # #                debug(f'remove conf {filepath}')
                 try:
-                    pass
-# #                    os.remove(filepath)
+# #                    pass
+                    os.remove(filepath)
                 except:
                     pass
                 await at.clean()
@@ -1885,7 +1819,7 @@ async def test():
     today = datetime.today()
     yesterday = today + timedelta(days=-1)
     l_source = [
-#             'https://gh-proxy.com/https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription_num',
+#             'https://raw.fastgit.org/w1770946466/Auto_proxy/main/Long_term_subscription_num',
             'https://raw.githubusercontent.com/a2470982985/getNode/main/v2ray.txt',
             ]
 #
