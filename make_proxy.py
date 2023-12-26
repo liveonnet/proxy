@@ -32,6 +32,7 @@
 # 20231122 优化：启动节点时马上进行测试，避免失效节点在初次启动时不能马上被排除
 # 20231124 raw.fastgit.org替换gh-proxy.com, 监测当前节点健康度时verify=False
 # 20231209 raw.githubusercontent.com替换raw.fastgit.org
+# 20231213 raw.fastgit.org替换raw.githubusercontent.com
 
 import binascii
 from base64 import b64decode, b64encode
@@ -164,9 +165,13 @@ def preexec_ignore_sigint():
     os.setpgrp()  # 建立单独的进程组，避免父进程的ctrl+c传递进来
 
 
-def b64d(s: str, url: str='') -> str|None:
+def b64d(s: str|bytes, url: str='', show: bool=True) -> str|None:
     '''解码base64
     支持添加'='来重试
+
+    `s` 要尝试解码的数据
+    `url` 数据来源
+    `show` 是否打印出错信息
     '''
     rslt = None
     if isinstance(s, bytes):
@@ -181,13 +186,20 @@ def b64d(s: str, url: str='') -> str|None:
         except:
             pass
     if rslt is None:
-        debug(f'decode failed {url=} s[:100]={s[:100]}')
+        if show:
+            if len(s) >= 500:
+                debug(f'64decode failed {url=} s[:100]={s[:100]}')
+            else:
+                debug(f'64decode failed {url=} {s=}')
     else:
         if isinstance(rslt, bytes):
             try:
                 rslt = rslt.decode()
             except UnicodeDecodeError as e:
-                debug(f'decode bytes failed {url=} {e=} rslt[:100]={rslt[:100]}')
+                if len(rslt) > 500:
+                    debug(f'decode bytes failed {url=} {e=} rslt[:100]={rslt[:100]}')
+                else:
+                    debug(f'decode bytes failed {url=} {e=} {rslt=}')
                 rslt = None
     return rslt
 
@@ -367,7 +379,8 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
         self.nr_min_succ = min_resp_count  # 每个代理测试连通的阈值，达到阈值认为代理可用
         self.timeout = timeout # 连接超时
         self.interval = interval  # 代理每次测试之间的休眠时间
-        self.urls = urls or ['https://www.google.com/', 'https://www.youtube.com/' ]  # 用于连通测试的目标站点，能访问到认为是连通
+# #        self.urls = urls or ['https://www.google.com/', 'https://www.youtube.com/' ]  # 用于连通测试的目标站点，能访问到认为是连通
+        self.urls = urls or ['https://www.youtube.com/', ]  # 用于连通测试的目标站点，能访问到认为是连通
         self.unit = unit  # 计量单位
 
     async def __aenter__(self):
@@ -586,7 +599,7 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
                 if nr_succ >= self.nr_min_succ:  # 达到阈值提前退出
                     break
             except Exception as e:
-                warn(f'{node} test failed: {type(e)} {e}')
+                warn(f'{node} {i+1}/{self.nr_try} test failed: {type(e)} {e}')
                 if self.nr_try - i - 1 + nr_succ < self.nr_min_succ:
                     break
             await asyncio.sleep(self.interval)
@@ -729,9 +742,11 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 case 'ss':  # base64(<method>:<password>)@<ip>:<port>#<alias>
                     _uuid = None
                     # 先判断是否整体为base64编码
-                    try:
-                        _s = b64decode(m.netloc.encode(), validate=True).decode()
-                    except:  # 非整体base64编码
+# #                    try:
+# #                        _s = b64decode(m.netloc.encode(), validate=True).decode()
+                    _s = b64d(m.netloc.encode(), url, False)
+                    if not _s:
+# #                    except:  # 非整体base64编码
                         *_tmp, _ip_port = m.netloc.split('@')
                         _tmp = ''.join(_tmp)
                         try:
@@ -908,7 +923,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
     async def _tmp_tolinkshare(self) -> list[Node]:
         l_node = []
-        url = 'https://raw.githubusercontent.com/tolinkshare/freenode/main/README.md'
+        url = 'https://raw.fastgit.org/tolinkshare/freenode/main/README.md'
         content = await self._getNodeData(url)
         if content:
             l = re.findall('```(.+?)```', content, re.U|re.M|re.S)
@@ -922,7 +937,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
     async def _tmp_vpnnet(self) -> list[Node]:
         l_node = []
-        url = 'https://raw.githubusercontent.com/VpnNetwork01/vpn-net/main/README.md'
+        url = 'https://raw.fastgit.org/VpnNetwork01/vpn-net/main/README.md'
         content = await self._getNodeData(url)
         if content:
             l = re.findall('```(.+?)```', content, re.U|re.M|re.S)
@@ -996,38 +1011,47 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 
 
         # 特殊处理
-        if url.startswith('https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/sub/'):
+        if url.startswith('https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/'):
             debug(f'特殊处理w1770946466')
             l_new = []
             for _line in r.split('\n'):
                 if _line.startswith('vmess://'):
                     _up = urlparse(_line)
 #                    debug(f'{_line=} to {_up=}')
-                    try:
-                        _tmp = b64decode(_up.netloc).decode()
-                    except Exception as e:
+                    _tmp = b64d(_up.netloc)
+#                    try:
+#                        _tmp = b64decode(_up.netloc).decode()
+#                    except Exception as e:
 #                        warn(f'error b64decode {_up.netloc=}')
-                        pass
+#                        continue
+#                        pass
 #                        mylogger.opt(exception=True).error(f'error b64decode {_up.netloc=}', diagnose=False, backtrace=False)
-                    else:
+                    if _tmp:
                         try:
                             json.loads(_tmp)
                             _newline = _line
-                        except:  # 只对vmess中base64解码后不是json格式的内容进行修正
-                            _tls, _uuid, _server, _port = re.split(':|@', _tmp, 3)
-                            _extra = parse_qs(_up.query) if _up.query else {}
-                            _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
-                            _j = {
-                                    'add': _server,
-                                    'port': _port,
-                                    'id': _uuid,
-                                    'aid': _extra.get('alterId', 0),
-                                    'path': _extra.get('path', '/'),
-                                    'host': _extra.get('obfsParam', ''),
-                                    'tls': _tls,
-                                    'obfs': _extra['obfs'],
-                                    }
-                            _newline = 'vmess://' + b64encode(json.dumps(_j).encode()).decode()
+                        except Exception as e:  # 只对vmess中base64解码后不是json格式的内容进行修正
+#                            debug(f'json.loads got {e} {_tmp=}')
+                            try:
+                                _tls, _uuid, _server, _port = re.split(':|@', _tmp, 3)
+                                _extra = parse_qs(_up.query) if _up.query else {}
+                                _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
+                                _j = {
+                                        'add': _server,
+                                        'port': _port,
+                                        'id': _uuid,
+                                        'aid': _extra.get('alterId', 0),
+                                        'path': _extra.get('path', '/'),
+                                        'host': _extra.get('obfsParam', ''),
+                                        'tls': _tls,
+#                                        'obfs': _extra['obfs'],
+                                        }
+                                _newline = 'vmess://' + b64encode(json.dumps(_j).encode()).decode()
+                            except Exception as e:
+                                warn(f'parse failed {e} for {_tmp=}')
+                                continue
+                    else:
+                        continue
                 elif _line.startswith('ss://'):
                     # base64(<method>:<password>)@<ip>:<port>#<alias>
                     _up = urlparse(_line)
@@ -1045,7 +1069,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
 
         # 特殊处理
-        if url == 'https://raw.githubusercontent.com/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml':
+        if url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml':
             full_content = yaml.load(r, yaml.FullLoader)
             proxies = full_content.get('proxies')
             l_node = []
@@ -1130,7 +1154,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             l_tmp = (x for x in ls if x)
 
             # 特殊处理
-            if url == 'https://raw.githubusercontent.com/learnhard-cn/free_proxy_ss/main/free':
+            if url == 'https://raw.fastgit.org/learnhard-cn/free_proxy_ss/main/free':
                 debug(f'特殊处理 {url=}')
                 _l_n = []
                 for _x in l_tmp:
@@ -1149,7 +1173,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 l_tmp = _l_n
 
             # 特殊处理
-            if url == 'https://raw.githubusercontent.com/Leon406/SubCrawler/master/sub/share/ss':
+            if url == 'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/ss':
                 l_new = []
 #                debug(f'try to process special format node, {url=}')
                 for _x in l_tmp:
@@ -1166,7 +1190,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 #debug(f'now {l_tmp=}')
 
             # 特殊处理
-            if url == 'https://raw.githubusercontent.com/eycorsican/rule-sets/master/kitsunebi_sub':
+            if url == 'https://raw.fastgit.org/eycorsican/rule-sets/master/kitsunebi_sub':
                 l_new = []
 #                debug(f'try to process special format node, {url=}')
                 for _x in l_tmp:
@@ -1194,7 +1218,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
 
             # 特殊处理
-            if url == 'https://raw.githubusercontent.com/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg':
+            if url == 'https://raw.fastgit.org/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg':
                 l_new = []
                 debug(f'try to process special format node, {url=}')
                 for _x in l_tmp:
@@ -1212,7 +1236,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     elif _x.startswith('vmess://'):
                         _idx = _x.find('?')
                         try:
-                            _t = b64decode(_x[8:_idx]).decode()
+                            _t = b64d(_x[8:_idx], url, False)
+                            assert _t
                             _tls, _uuid, _server, _port = re.split(':|@', _t, 3)
                             _up = urlparse(_x)
                             _qs = parse_qs(_up.query)
@@ -1227,7 +1252,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                                   }
                             _x = _x[:8] + b64encode(json.dumps(_d).encode()).decode()
                         except Exception as e:
-                            warn(f'parse vmess data from {url=} got {e}')
+                            warn(f'parse vmess got {e}, {url=} {_x[8:_idx]}')
                             continue
                     l_new.append(_x)
                 l_tmp = l_new
@@ -1413,36 +1438,36 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             f'https://freeclash.org/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%m%d")}.txt',
             f'https://freeclash.org/wp-content/uploads/{today.year}/{today.month:02d}/{today.strftime("%m%d")}.txt',
 
-            'https://raw.githubusercontent.com/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
+            'https://raw.fastgit.org/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
 
-            'https://raw.githubusercontent.com/freefq/free/master/v2',
-            #'https://raw.githubusercontent.com/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
-# #            'https://raw.githubusercontent.com/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
-            'https://raw.githubusercontent.com/ts-sf/fly/main/v2',
-            'https://raw.githubusercontent.com/ts-sf/fly/main/v2',
+            'https://raw.fastgit.org/freefq/free/master/v2',
+            #'https://raw.fastgit.org/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
+# #            'https://raw.fastgit.org/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
+            'https://raw.fastgit.org/ts-sf/fly/main/v2',
+            'https://raw.fastgit.org/ts-sf/fly/main/v2',
             ##'https://raw.fgit.ml/ts-sf/fly/main/v2', 
             'https://cdn.jsdelivr.net/gh/ermaozi01/free_clash_vpn/subscribe/v2ray.txt',
 # #            'https://tt.vg/freev2',
             'https://v2ray.neocities.org/v2ray.txt',
-            'https://raw.githubusercontent.com/Leon406/SubCrawler/master/sub/share/v2',
-            #'https://raw.githubusercontent.com/Leon406/SubCrawler/master/sub/share/ss',
-            'https://raw.githubusercontent.com/Leon406/SubCrawler/master/sub/share/tr',
-            'https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt',
-            #'https://raw.githubusercontent.com/Lewis-1217/FreeNodes/main/bpjzx1',
-            #'https://raw.githubusercontent.com/Lewis-1217/FreeNodes/main/bpjzx2',
-            'https://raw.githubusercontent.com/a2470982985/getNode/main/v2ray.txt',
-            'https://raw.githubusercontent.com/ermaozi01/free_clash_vpn/main/subscribe/v2ray.txt',
-            'https://raw.githubusercontent.com/ripaojiedian/freenode/main/sub',
+            'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/v2',
+            #'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/ss',
+            'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/tr',
+            'https://raw.fastgit.org/peasoft/NoMoreWalls/master/list.txt',
+            #'https://raw.fastgit.org/Lewis-1217/FreeNodes/main/bpjzx1',
+            #'https://raw.fastgit.org/Lewis-1217/FreeNodes/main/bpjzx2',
+            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',
+            'https://raw.fastgit.org/ermaozi01/free_clash_vpn/main/subscribe/v2ray.txt',
+            'https://raw.fastgit.org/ripaojiedian/freenode/main/sub',
 
-            #'https://gh-proxy.com//raw.githubusercontent.com/yaney01/Yaney01/main/yaney_01',
-            #'https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt',
-            'https://raw.githubusercontent.com/learnhard-cn/free_proxy_ss/main/free',
-            'https://raw.githubusercontent.com/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml',
-            'https://raw.githubusercontent.com/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',
-            'https://raw.githubusercontent.com/ZywChannel/free/main/sub',
-            'https://raw.githubusercontent.com/free18/v2ray/main/v2ray.txt',
+            #'https://gh-proxy.com//raw.fastgit.org/yaney01/Yaney01/main/yaney_01',
+            #'https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt',
+            'https://raw.fastgit.org/learnhard-cn/free_proxy_ss/main/free',
+            'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml',
+            'https://raw.fastgit.org/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',
+            'https://raw.fastgit.org/ZywChannel/free/main/sub',
+            'https://raw.fastgit.org/free18/v2ray/main/v2ray.txt',
             #'https://sub.nicevpn.top/Clash.yaml',
-            'https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray',
+            'https://raw.fastgit.org/mfuu/v2ray/master/v2ray',
 
            f'https://onenode.cc/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%Y%m%d")}.txt',
            f'https://onenode.cc/wp-content/uploads/{today.year}/{today.month:02d}/{today.strftime("%Y%m%d")}.txt',
@@ -1452,18 +1477,18 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             # https://github.com/Helpsoftware/fanqiang
             'https://jiang.netlify.com/',
             'https://youlianboshi.netlify.app/',
-            'https://raw.githubusercontent.com/eycorsican/rule-sets/master/kitsunebi_sub',
-            'https://raw.githubusercontent.com/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
+            'https://raw.fastgit.org/eycorsican/rule-sets/master/kitsunebi_sub',
+            'https://raw.fastgit.org/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
 
-            'https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription_num',
-            'https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity',
-            f'https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/sub/{beforeyesterday.strftime("%y%m")}/{beforeyesterday.strftime("%y%m%d")}.txt',
-            f'https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
-            f'https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
+            'https://raw.fastgit.org/w1770946466/Auto_proxy/main/Long_term_subscription_num',
+            'https://raw.fastgit.org/mahdibland/ShadowsocksAggregator/master/Eternity',
+            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{beforeyesterday.strftime("%y%m")}/{beforeyesterday.strftime("%y%m%d")}.txt',
+            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
+            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
              'https://mareep.netlify.app/sub/merged_proxies_new.yaml',  # https://github.com/vveg26/chromego_merge
-            'https://raw.githubusercontent.com/a2470982985/getNode/main/v2ray.txt',  # https://github.com/Flik6/getNode
+            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',  # https://github.com/Flik6/getNode
         ]
-        #l_source = ['https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
+        #l_source = ['https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
         #l_source = l_source[:5]+ l_source[-5:]  # debug only
 
         return l_source
@@ -1471,7 +1496,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
     async def _getNodeList(self, from_source: bool=False) -> list[Node]:
         l_source = await self._getNodeUrl()
-# #        l_source = ['https://raw.githubusercontent.com/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',] # debug only
+# #        l_source = ['https://raw.fastgit.org/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',] # debug only
         l_rslt = await asyncio.gather(*[self._parseNodeData(x) for x in l_source])
         l_rslt.append(await self._tmp_freevpnx())
         l_rslt.append(await self._tmp_ssfree())
@@ -1499,7 +1524,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 st_exist.add(_h)
             d_nd[_h].append(l_node[_i].source)
         for _n in l_uniq:
-            _n.source = d_nd[hash(_n)]
+            _n.source = list(set(d_nd[hash(_n)]))  # 排重，一个源里可能重复出现相同节点
         del d_nd
 
         l_node = l_uniq
@@ -1825,9 +1850,13 @@ async def test():
 
     today = datetime.today()
     yesterday = today + timedelta(days=-1)
+    beforeyesterday = yesterday + timedelta(days=-1)
     l_source = [
-#             'https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription_num',
-            'https://raw.githubusercontent.com/a2470982985/getNode/main/v2ray.txt',
+#             'https://raw.fastgit.org/w1770946466/Auto_proxy/main/Long_term_subscription_num',
+            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{beforeyesterday.strftime("%y%m")}/{beforeyesterday.strftime("%y%m%d")}.txt',
+            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
+            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
+            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',
             ]
 #
     l_rslt = await asyncio.gather(*[x._parseNodeData(_x) for _x in l_source])
