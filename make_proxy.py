@@ -33,6 +33,7 @@
 # 20231124 raw.fastgit.org替换gh-proxy.com, 监测当前节点健康度时verify=False
 # 20231209 raw.githubusercontent.com替换raw.fastgit.org
 # 20231213 raw.fastgit.org替换raw.githubusercontent.com
+# 20230102 增加支持 https://github.com/freenodes/freenodes/
 
 import binascii
 from base64 import b64decode, b64encode
@@ -1067,6 +1068,33 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 l_new.append(_newline)
             r = b64encode('\n'.join(l_new).encode()).decode()
 
+        # 特殊处理
+        if url == 'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml':
+            full_content = yaml.load(r, yaml.FullLoader)
+            proxies = full_content.get('proxies')
+            l_node = []
+            for _x in proxies:
+                try:
+                    _param = {
+                            'host': _x['server'],
+                            'id': _x.get('uuid', ''),
+                            'port': _x['port'],
+                            'aid': _x.get('alterId', 0),
+                            'tls': _x.get('tls', None),
+# #                            'path': _x['ws-opts']['path'] if 'ws-opts' in _x and 'path' in _x['ws-opts'] else '/',
+                            'path': _x.get('ws-opts', {}).get('path', '/'),
+                            'host': _x.get('ws-opts', {}).get('headers', {}).get('host', {})
+                    }
+                    if _x['type'] == 'ss':
+                        _param['method'] = _x['cipher']
+                    _param = {**_param, **_x}
+                    l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
+                except Exception as e:
+                    warn(f'decode failed for {url} {e=} {_x=}')
+                    continue
+            debug(f'got {len(l_node)} record(s) from {url}')
+            return l_node
+
 
         # 特殊处理
         if url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml':
@@ -1487,6 +1515,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
              'https://mareep.netlify.app/sub/merged_proxies_new.yaml',  # https://github.com/vveg26/chromego_merge
             'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',  # https://github.com/Flik6/getNode
+
+            'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml',
         ]
         #l_source = ['https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
         #l_source = l_source[:5]+ l_source[-5:]  # debug only
@@ -1853,10 +1883,11 @@ async def test():
     beforeyesterday = yesterday + timedelta(days=-1)
     l_source = [
 #             'https://raw.fastgit.org/w1770946466/Auto_proxy/main/Long_term_subscription_num',
-            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{beforeyesterday.strftime("%y%m")}/{beforeyesterday.strftime("%y%m%d")}.txt',
-            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
-            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
-            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',
+# #            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{beforeyesterday.strftime("%y%m")}/{beforeyesterday.strftime("%y%m%d")}.txt',
+# #            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
+# #            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
+# #            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',
+            'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml',
             ]
 #
     l_rslt = await asyncio.gather(*[x._parseNodeData(_x) for _x in l_source])
