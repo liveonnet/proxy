@@ -34,6 +34,8 @@
 # 20231209 raw.githubusercontent.com替换raw.fastgit.org
 # 20231213 raw.fastgit.org替换raw.githubusercontent.com
 # 20230102 增加支持 https://github.com/freenodes/freenodes/
+# 20230104 支持 Barabama/FreeNodes/ 节点内容
+#          以纯真ip库为判断依据过滤一部分地区的节点
 
 import binascii
 from base64 import b64decode, b64encode
@@ -54,6 +56,7 @@ import asyncio
 #setattr(asyncio.sslproto._SSLProtocolTransport, "_start_tls_compatible", True)
 #import uvloop
 import sys
+import io
 import os
 import os.path
 import random
@@ -81,6 +84,7 @@ import ipaddress
 import jsonpickle
 import yaml
 import httpx
+from qqwry import QQwry
 from dns.asyncresolver import Resolver
 import dns.resolver
 #from lxml import etree
@@ -106,6 +110,7 @@ from make_proxy_conf import test_wait_seconds
 from make_proxy_conf import v2ray_path, hysteria_path, hysteria2_path, conf_basepath
 from make_proxy_conf import inboundsSetting, outboundsSetting_vmess, outboundsSetting_ss, outboundsSetting_trojan, outboundsSetting_vless
 from make_proxy_conf import settingHysteria , settingHysteria2
+from make_proxy_conf import qqwry_path
 event_exit = asyncio.Event()
 CTRL_C_TIME = 0
 
@@ -203,6 +208,24 @@ def b64d(s: str|bytes, url: str='', show: bool=True) -> str|None:
                     debug(f'decode bytes failed {url=} {e=} {rslt=}')
                 rslt = None
     return rslt
+
+
+class IpFilter(object):
+    '''查纯真ip库，过滤有问题ip和大陆地区，标中国的也当成大陆地区过滤
+    '''
+    p = re.compile('中国|北京|上海|重庆|天津|本机|局域|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|内蒙古|广西|西藏|宁夏|新疆|香港|澳门', re.U)
+
+    def __init__(self, qqwry_path: str):
+        self.q = QQwry()
+        self.q.load_file(qqwry_path)
+
+
+    def isMainland(self, ip: str):
+        if not ip:
+            return True
+        if self.p.search(ip):
+            return True
+        return False
 
 
 class aobject(object):
@@ -964,6 +987,30 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             return []
 
         # 特殊处理
+        if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt' or url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt' or url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt':
+#-#            debug('特殊处理yudou66')
+#-#            l_tmp = (x for x in r.split('\n') if x)
+#-#            for _l in l_tmp:
+#-#                _up = urlparse(_l)
+#-#                match _up.scheme:
+#-#                    case 'vless':
+#-#                        # vless://<uuid>@<server>:<port>?encryption=<>&security=<>&sni=<>&type=<>&host=<>&path=<>#<alias>
+#-#                        pass
+#-#                    case 'vmess':
+#-#                        # vmess://base64(json(data))
+#-#                        pass
+#-#                    case 'ss':
+#-#                        # ss://base64(<method>:<password>)@<server>:<port>#<alias>
+#-#                        pass
+#-#                    case 'trojan':
+#-#                        # trojan://<password>@<server>:<port>?security=<>&sni=<>&type=<>&headerType=<>#<alias>
+#-#                        pass
+#-#                    case _:
+#-#                        debug(f'未处理协议 {_up.scheme}')
+            r = b64encode(r.encode())
+
+
+        # 特殊处理
         if url == 'https://mareep.netlify.app/sub/merged_proxies_new.yaml':
             full_content = yaml.load(r, yaml.FullLoader)
             proxies = full_content.get('proxies')
@@ -1013,7 +1060,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
         # 特殊处理
         if url.startswith('https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/'):
-            debug(f'特殊处理w1770946466')
+# #            debug(f'特殊处理w1770946466')
             l_new = []
             for _line in r.split('\n'):
                 if _line.startswith('vmess://'):
@@ -1517,12 +1564,20 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',  # https://github.com/Flik6/getNode
 
             'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
         ]
         #l_source = ['https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
         #l_source = l_source[:5]+ l_source[-5:]  # debug only
 
         return l_source
 
+    def _filterArea(l_node: list[Node]):
+        f = IpFilter(qqwry_path)
+        l_node = [_n for _n in l_node if _n.real_ip and not f.isMainland(_n.real_ip)]
+        debug(f'after ip area filter, remain {len(l_node):,} node(s)')
+        return l_node
 
     async def _getNodeList(self, from_source: bool=False) -> list[Node]:
         l_source = await self._getNodeUrl()
@@ -1566,6 +1621,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         #with open('/tmp/dbg_nodes', 'w') as fo:
         #    fo.write(jsonpickle.dumps(l_node, indent=2))
         await self.__class__._host2ip(l_node, timeout=5, batch=2000)
+        self.__class__._filterArea(l_node)
+
         l_node = self.__class__._filterBySimpleLow(l_node, timeout=5, batch=3000)
         info(f'after simple filter, remain {len(l_node):,} node(s)')
         if event_exit.is_set():
@@ -1887,7 +1944,10 @@ async def test():
 # #            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
 # #            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
 # #            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',
-            'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml',
+# #            'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
             ]
 #
     l_rslt = await asyncio.gather(*[x._parseNodeData(_x) for _x in l_source])
@@ -1938,6 +1998,7 @@ async def test():
     l_node = l_uniq
 
     await x.__class__._host2ip(l_node, timeout=5, batch=2000)
+    x.__class__._filterArea(l_node)
     l_node = x.__class__._filterBySimpleLow(l_node, timeout=5, batch=3000)
     info(f'after simple filter, remain {len(l_node):,} node(s)')
     info(f'total {len(l_node):,} node(s) to test')
