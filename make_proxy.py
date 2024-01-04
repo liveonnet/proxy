@@ -1576,6 +1576,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
     def _filterArea(l_node: list[Node]):
         f = IpFilter(qqwry_path)
         l_node = [_n for _n in l_node if _n.real_ip and not f.isMainland(_n.real_ip)]
+        f.clear()
         debug(f'after ip area filter, remain {len(l_node):,} node(s)')
         return l_node
 
@@ -1621,7 +1622,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         #with open('/tmp/dbg_nodes', 'w') as fo:
         #    fo.write(jsonpickle.dumps(l_node, indent=2))
         await self.__class__._host2ip(l_node, timeout=5, batch=2000)
-        self.__class__._filterArea(l_node)
+        l_node = self.__class__._filterArea(l_node)
 
         l_node = self.__class__._filterBySimpleLow(l_node, timeout=5, batch=3000)
         info(f'after simple filter, remain {len(l_node):,} node(s)')
