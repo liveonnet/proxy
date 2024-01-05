@@ -36,6 +36,7 @@
 # 20230102 增加支持 https://github.com/freenodes/freenodes/
 # 20230104 支持 Barabama/FreeNodes/ 节点内容
 #          以纯真ip库为判断依据过滤一部分地区的节点
+# 20230105 完善安国别统计相关逻辑，不再按alias过滤，使用赋值表达式简化代码
 
 import binascii
 from base64 import b64decode, b64encode
@@ -211,22 +212,34 @@ def b64d(s: str|bytes, url: str='', show: bool=True) -> str|None:
 
 
 class IpFilter(object):
-    '''查纯真ip库，过滤有问题ip和大陆地区，标中国的也当成大陆地区过滤
+    '''查纯真ip库，
     '''
     p = re.compile('中国|北京|上海|重庆|天津|本机|局域|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|内蒙古|广西|西藏|宁夏|新疆|香港|澳门', re.U)
+    pCountry = re.compile('中国|欧盟|蒙古|朝鲜|韩国|日本|菲律宾|越南|老挝|柬埔寨|缅甸|泰国|马来西亚|文莱|新加坡|印度尼西亚|东帝汶|尼泊尔|不丹|孟加拉国|印度|巴基斯坦|斯里兰卡|马尔代夫|哈萨克斯坦|吉尔吉斯斯坦|塔吉克斯坦|乌兹别克斯坦|土库曼斯坦|阿富汗|伊拉克|伊朗|叙利亚|约旦|黎巴嫩|以色列|巴勒斯坦|沙特阿拉伯|巴林|卡塔尔|科威特|阿拉伯联合酋长国|阿曼|也门|格鲁吉亚|亚美尼亚|阿塞拜疆|土耳其|塞浦路斯|芬兰|瑞典|挪威|冰岛|丹麦|法罗群岛|爱沙尼亚|拉脱维亚|立陶宛|白俄罗斯|俄罗斯|乌克兰|摩尔多瓦|波兰|捷克|斯洛伐克|匈牙利|德国|奥地利|瑞士|列支敦士登|英国|爱尔兰|荷兰|比利时|卢森堡|法国|摩纳哥|罗马尼亚|保加利亚|塞尔维亚|马其顿|阿尔巴尼亚|希腊|斯洛文尼亚|克罗地亚|波斯尼亚和墨塞哥维那|意大利|梵蒂冈|圣马力诺|马耳他|西班牙|葡萄牙|安道尔|埃及|利比亚|苏丹|突尼斯|阿尔及利亚|摩洛哥|亚速尔群岛|马德拉群岛|埃塞俄比亚|厄立特里亚|索马里|吉布提|肯尼亚|坦桑尼亚|乌干达|卢旺达|布隆迪|塞舌尔|乍得|中非|喀麦隆|赤道几内亚|加蓬|刚果共和国|刚果民主共和国|圣多美及普林西比|毛里塔尼亚|西撒哈拉|塞内加尔|冈比亚|马里|布基纳法索|几内亚|几内亚比绍|佛得角|塞拉利昂|利比里亚|科特迪瓦|加纳|多哥|贝宁|尼日尔|加那利群岛|赞比亚|安哥拉|津巴布韦|马拉维|莫桑比克|博茨瓦纳|纳米比亚|南非|斯威士兰|莱索托|马达加斯加|科摩罗|毛里求斯|留尼旺|圣赫勒拿|澳大利亚|新西兰|巴布亚新几内亚|所罗门群岛|瓦努阿图|密克罗尼西亚|马绍尔群岛|帕劳|瑙鲁|基里巴斯|图瓦卢|萨摩亚|斐济群岛|汤加|库克群岛|关岛|新喀里多尼亚|法属波利尼西亚|皮特凯恩岛|瓦利斯与富图纳|纽埃|托克劳|美属萨摩亚|北马里亚纳|加拿大|美国|墨西哥|格陵兰|危地马拉|伯利兹|萨尔瓦多|洪都拉斯|尼加拉瓜|哥斯达黎加|巴拿马|巴哈马|古巴|牙买加|海地|多米尼加共和国|安提瓜和巴布达|圣基茨和尼维斯|多米尼克|圣卢西亚|圣文森特和格林纳丁斯|格林纳达|巴巴多斯|特立尼达和多巴哥|波多黎各|英属维尔京群岛|美属维尔京群岛|安圭拉|蒙特塞拉特|瓜德罗普|马提尼克|荷属安的列斯|阿鲁巴|特克斯和凯科斯群岛|开曼群岛|百慕大|哥伦比亚|委内瑞拉|圭亚那|法属圭亚那|苏里南|厄瓜多尔|秘鲁|玻利维亚|巴西|智利|阿根廷|乌拉圭|巴拉圭|台湾', re.U)
 
     def __init__(self, qqwry_path: str):
         self.q = QQwry()
         self.q.load_file(qqwry_path)
 
 
-    def isMainland(self, ip: str):
-        if not ip:
-            return True
-        area = self.q.lookup(ip)[0]
-        if self.p.search(area):
-            return True
-        return False
+    def getArea(self, ip: str) -> str:
+        return self.q.lookup(ip)[0] if ip else ''
+
+
+    def isMainland(self, ip: str) -> bool:
+        '''标识是否为大陆地区，标中国、本机、局域网的也当成大陆地区
+        '''
+        return True if self.p.search(self.getArea(ip)) else False
+
+
+    def getCountry(self, ip: str) -> str:
+        '''将国家地区精简为国家 例如 `美国华盛顿` 精简为 `美国`
+        欧盟、台湾也算
+        '''
+        if (m := self.pCountry.search(area := self.getArea(ip))):
+            return m.group(0)
+        return area
+
 
     def clear(self):
         self.q.clear()
@@ -524,7 +537,8 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
                 await asyncio.sleep(self.interval)
         finally:
             try:
-                p.kill()
+                if p:
+                    p.kill()
             except ProcessLookupError:
                 pass
             try:
@@ -886,17 +900,13 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         l_url = []
         today = datetime.today()
         url = 'https://www.mibei77.com/search/label/jiedian'
-        content = await self._getNodeData(url)
-        if not content:
+        if not (content := await self._getNodeData(url)):
             return l_url
-        m = re.search("<article class='blog-post hentry index-post post-0'>.+?<a href='([^']+)' .+?>.+?</article>", content, re.M|re.U|re.S)
-        if m:
+        if m := re.search("<article class='blog-post hentry index-post post-0'>.+?<a href='([^']+)' .+?>.+?</article>", content, re.M|re.U|re.S):
             today_url = m.group(1)
             debug(f'{today_url=}')
-            content = await self._getNodeData(today_url)
-            if content:
-                m = re.search('http://mm\.mibei77\.com/\d{6}/.+?\.txt', content)
-                if m:
+            if content := await self._getNodeData(today_url):
+                if m := re.search('http://mm\.mibei77\.com/\d{6}/.+?\.txt', content):
                     node_url = m.group()
                     l_url.append(node_url)
                     debug(f'detected {node_url}')
@@ -909,12 +919,10 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
         return l_url
 
-
     async def _tmp_freevpnx(self) -> list[Node]:
         url = 'https://url.cr/api/user.ashx?do=freevpn&ip=127.0.0.1&uuid=67ee96e3-70c5-4741-9105-60d7fd8c42b3'
         l_node = []
-        content = await self._getNodeData(url)
-        if content:
+        if content := await self._getNodeData(url):
             content = re.sub('(\r\n){2,}', '\n', content)
             l_tmp = content.split('\n')
             debug(f'got {len(l_tmp)} record(s) from {url}')
@@ -922,15 +930,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
         return l_node
 
-
     async def _tmp_ssfree(self) -> list[Node]:
         url = 'https://view.ssfree.ru/'
         l_node = []
-        content = await self._getNodeData(url)
-        if not content:
+        if not (content := await self._getNodeData(url)):
             return l_node
-        m = re.search('data-clipboard-text="(.+?)"', content)
-        if m:
+        if m := re.search('data-clipboard-text="(.+?)"', content):
             data = m.group(1)
             if data.startswith('vmess://'):  # 更正地址
                 try:
@@ -952,8 +957,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
     async def _tmp_tolinkshare(self) -> list[Node]:
         l_node = []
         url = 'https://raw.fastgit.org/tolinkshare/freenode/main/README.md'
-        content = await self._getNodeData(url)
-        if content:
+        if content := await self._getNodeData(url):
             l = re.findall('```(.+?)```', content, re.U|re.M|re.S)
             if l:
                 l_tmp = list(filter(None, chain.from_iterable((x.split('\n') for x in l))))  # filter用于过滤空行
@@ -966,10 +970,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
     async def _tmp_vpnnet(self) -> list[Node]:
         l_node = []
         url = 'https://raw.fastgit.org/VpnNetwork01/vpn-net/main/README.md'
-        content = await self._getNodeData(url)
-        if content:
-            l = re.findall('```(.+?)```', content, re.U|re.M|re.S)
-            if l:
+        if content := await self._getNodeData(url):
+            if l := re.findall('```(.+?)```', content, re.U|re.M|re.S):
                 l_tmp = list(filter(None, chain.from_iterable((x.split('\n') for x in l))))  # filter用于过滤空行
                 debug(f'got {len(l_tmp)} record(s) from {url}')
 # #                pp = pprint.PrettyPrinter(indent=2, width=80, compact=True, sort_dicts=False)
@@ -980,8 +982,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
     async def _parseNodeData(self, url: str, data: str=None) -> list[Node]:
         if url:
             #debug(f'getting {url}')
-            r = await self._getNodeData(url)
-            if not r:
+            if not (r := await self._getNodeData(url)):
                 warn(f'no node data got from {url}')
                 return []
         elif data:
@@ -1069,16 +1070,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             for _line in r.split('\n'):
                 if _line.startswith('vmess://'):
                     _up = urlparse(_line)
-#                    debug(f'{_line=} to {_up=}')
-                    _tmp = b64d(_up.netloc)
-#                    try:
-#                        _tmp = b64decode(_up.netloc).decode()
-#                    except Exception as e:
-#                        warn(f'error b64decode {_up.netloc=}')
-#                        continue
-#                        pass
-#                        mylogger.opt(exception=True).error(f'error b64decode {_up.netloc=}', diagnose=False, backtrace=False)
-                    if _tmp:
+                    if _tmp := b64d(_up.netloc):
                         try:
                             json.loads(_tmp)
                             _newline = _line
@@ -1125,6 +1117,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             proxies = full_content.get('proxies')
             l_node = []
             for _x in proxies:
+                if _x['type'] == 'ssr':
+                    continue
                 try:
                     _param = {
                             'host': _x['server'],
@@ -1223,8 +1217,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             debug(f'got {len(l_node)} record(s) from {url}')
             return l_node
 
-        s = b64d(r, url)
-        if not s:
+        if not (s := b64d(r, url)):
             error(f'decode failed {url} for {r[:100]}')
             return []
         ls = s.split('\n')
@@ -1581,8 +1574,13 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         f = IpFilter(qqwry_path)
         l_node = [_n for _n in l_node if _n.real_ip and not f.isMainland(_n.real_ip)]
         f.clear()
-        info(f'after ip area filter, remain {len(l_node):,} node(s)')
+        info(f'after area filter, remain {len(l_node):,} node(s)')
         return l_node
+
+    def statCountry(self, l_ip: list[Node]) -> Counter:
+        f = IpFilter(qqwry_path)
+        c = Counter(f.getCountry(x.real_ip) for x in l_ip)
+        return c
 
     async def _getNodeList(self, from_source: bool=False) -> list[Node]:
         l_source = await self._getNodeUrl()
@@ -1633,9 +1631,9 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         if event_exit.is_set():
             warn('got exit event')
             return []
-        # 过滤掉中国节点
-        l_node = list(filter(lambda x: x.alias.find('中国') == -1 and x.alias.find('CN') == -1, l_node))
-        info(f'after cn filter, remain {len(l_node):,} node(s)')
+# #        # 过滤掉中国节点
+# #        l_node = list(filter(lambda x: x.alias.find('中国') == -1 and x.alias.find('CN') == -1, l_node))
+# #        info(f'after cn filter, remain {len(l_node):,} node(s)')
         st_now_source = set(chain.from_iterable(map(attrgetter('source'), l_node)))  # stat
         warn(f'bad source: {st_all_source - st_now_source}')  # 连一个可连(不见得可用)节点都没有的来源
 
@@ -1669,6 +1667,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     debug(f'STAT proto {Counter((x.proto for x in l_tested)).most_common()}')  # 按协议统计
                     debug(f'STAT ip/domain {Counter(("domain" if x.ip!=x.real_ip else "ip" for x in l_tested)).most_common()}')  # 按domain/ip统计
                     debug(f'STAT source_cnt {Counter((len(x.source) for x in l_tested)).most_common()}')  # 按节点来源数量统计
+                    debug(f'STAT area {self.statCountry(l_tested).most_common()}')
                 d_avaliable = OrderedDict(Counter(chain.from_iterable(x.source for x in l_tested)).most_common())
                 for _k, _v in d_avaliable.items():
                     debug(f'<green>{f"{_v}/{d_source_cnt[_k]}":<10}{_k}</green>')
@@ -1950,8 +1949,8 @@ async def test():
 # #            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
 # #            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',
 # #            'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml',
-            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt',
-            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
+# #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt',
+# #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
             ]
 #
@@ -2003,7 +2002,7 @@ async def test():
     l_node = l_uniq
 
     await x.__class__._host2ip(l_node, timeout=5, batch=2000)
-    x.__class__._filterArea(l_node)
+    l_node = x.__class__._filterArea(l_node)
     l_node = x.__class__._filterBySimpleLow(l_node, timeout=5, batch=3000)
     info(f'after simple filter, remain {len(l_node):,} node(s)')
     info(f'total {len(l_node):,} node(s) to test')
@@ -2027,6 +2026,7 @@ async def test():
             debug(f'STAT proto {Counter((x.proto for x in l_tested)).most_common()}')  # 按协议统计
             debug(f'STAT ip/domain {Counter(("domain" if x.ip!=x.real_ip else "ip" for x in l_tested)).most_common()}')  # 按domain/ip统计
             debug(f'STAT source_cnt {Counter((len(x.source) for x in l_tested)).most_common()}')  # 按节点来源数量统计
+            debug(f'STAT area {x.statCountry(l_tested).most_common()}')
 
             d_source_cnt = dict(Counter(chain.from_iterable(_x.source for _x in l_node)).most_common())  # stat
             debug(pp.pformat(d_source_cnt))
