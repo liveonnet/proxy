@@ -223,9 +223,13 @@ class IpFilter(object):
     def isMainland(self, ip: str):
         if not ip:
             return True
-        if self.p.search(ip):
+        area = self.q.lookup(ip)[0]
+        if self.p.search(area):
             return True
         return False
+
+    def clear(self):
+        self.q.clear()
 
 
 class aobject(object):
@@ -1577,7 +1581,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         f = IpFilter(qqwry_path)
         l_node = [_n for _n in l_node if _n.real_ip and not f.isMainland(_n.real_ip)]
         f.clear()
-        debug(f'after ip area filter, remain {len(l_node):,} node(s)')
+        info(f'after ip area filter, remain {len(l_node):,} node(s)')
         return l_node
 
     async def _getNodeList(self, from_source: bool=False) -> list[Node]:
