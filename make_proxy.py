@@ -37,6 +37,8 @@
 # 20230104 支持 Barabama/FreeNodes/ 节点内容
 #          以纯真ip库为判断依据过滤一部分地区的节点
 # 20230105 完善安国别统计相关逻辑，不再按alias过滤，使用赋值表达式简化代码
+# 20230108 代理开启proxy_port+1无密码服务，方便pac使用；目前hysteria/2还不支持多http监听
+#          暂时只使用10个来源的节点，减少评估时间
 
 import binascii
 from base64 import b64decode, b64encode
@@ -211,8 +213,8 @@ def b64d(s: str|bytes, url: str='', show: bool=True) -> str|None:
     return rslt
 
 
-class IpFilter(object):
-    '''查纯真ip库，
+class Ip2Area(object):
+    '''查纯真ip库，根据ip获取地区信息
     '''
     p = re.compile('中国|北京|上海|重庆|天津|本机|局域|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|内蒙古|广西|西藏|宁夏|新疆|香港|澳门', re.U)
     pCountry = re.compile('中国|欧盟|蒙古|朝鲜|韩国|日本|菲律宾|越南|老挝|柬埔寨|缅甸|泰国|马来西亚|文莱|新加坡|印度尼西亚|东帝汶|尼泊尔|不丹|孟加拉国|印度|巴基斯坦|斯里兰卡|马尔代夫|哈萨克斯坦|吉尔吉斯斯坦|塔吉克斯坦|乌兹别克斯坦|土库曼斯坦|阿富汗|伊拉克|伊朗|叙利亚|约旦|黎巴嫩|以色列|巴勒斯坦|沙特阿拉伯|巴林|卡塔尔|科威特|阿拉伯联合酋长国|阿曼|也门|格鲁吉亚|亚美尼亚|阿塞拜疆|土耳其|塞浦路斯|芬兰|瑞典|挪威|冰岛|丹麦|法罗群岛|爱沙尼亚|拉脱维亚|立陶宛|白俄罗斯|俄罗斯|乌克兰|摩尔多瓦|波兰|捷克|斯洛伐克|匈牙利|德国|奥地利|瑞士|列支敦士登|英国|爱尔兰|荷兰|比利时|卢森堡|法国|摩纳哥|罗马尼亚|保加利亚|塞尔维亚|马其顿|阿尔巴尼亚|希腊|斯洛文尼亚|克罗地亚|波斯尼亚和墨塞哥维那|意大利|梵蒂冈|圣马力诺|马耳他|西班牙|葡萄牙|安道尔|埃及|利比亚|苏丹|突尼斯|阿尔及利亚|摩洛哥|亚速尔群岛|马德拉群岛|埃塞俄比亚|厄立特里亚|索马里|吉布提|肯尼亚|坦桑尼亚|乌干达|卢旺达|布隆迪|塞舌尔|乍得|中非|喀麦隆|赤道几内亚|加蓬|刚果共和国|刚果民主共和国|圣多美及普林西比|毛里塔尼亚|西撒哈拉|塞内加尔|冈比亚|马里|布基纳法索|几内亚|几内亚比绍|佛得角|塞拉利昂|利比里亚|科特迪瓦|加纳|多哥|贝宁|尼日尔|加那利群岛|赞比亚|安哥拉|津巴布韦|马拉维|莫桑比克|博茨瓦纳|纳米比亚|南非|斯威士兰|莱索托|马达加斯加|科摩罗|毛里求斯|留尼旺|圣赫勒拿|澳大利亚|新西兰|巴布亚新几内亚|所罗门群岛|瓦努阿图|密克罗尼西亚|马绍尔群岛|帕劳|瑙鲁|基里巴斯|图瓦卢|萨摩亚|斐济群岛|汤加|库克群岛|关岛|新喀里多尼亚|法属波利尼西亚|皮特凯恩岛|瓦利斯与富图纳|纽埃|托克劳|美属萨摩亚|北马里亚纳|加拿大|美国|墨西哥|格陵兰|危地马拉|伯利兹|萨尔瓦多|洪都拉斯|尼加拉瓜|哥斯达黎加|巴拿马|巴哈马|古巴|牙买加|海地|多米尼加共和国|安提瓜和巴布达|圣基茨和尼维斯|多米尼克|圣卢西亚|圣文森特和格林纳丁斯|格林纳达|巴巴多斯|特立尼达和多巴哥|波多黎各|英属维尔京群岛|美属维尔京群岛|安圭拉|蒙特塞拉特|瓜德罗普|马提尼克|荷属安的列斯|阿鲁巴|特克斯和凯科斯群岛|开曼群岛|百慕大|哥伦比亚|委内瑞拉|圭亚那|法属圭亚那|苏里南|厄瓜多尔|秘鲁|玻利维亚|巴西|智利|阿根廷|乌拉圭|巴拉圭|台湾', re.U)
@@ -221,16 +223,13 @@ class IpFilter(object):
         self.q = QQwry()
         self.q.load_file(qqwry_path)
 
-
     def getArea(self, ip: str) -> str:
         return self.q.lookup(ip)[0] if ip else ''
-
 
     def isMainland(self, ip: str) -> bool:
         '''标识是否为大陆地区，标中国、本机、局域网的也当成大陆地区
         '''
         return True if self.p.search(self.getArea(ip)) else False
-
 
     def getCountry(self, ip: str) -> str:
         '''将国家地区精简为国家 例如 `美国华盛顿` 精简为 `美国`
@@ -239,7 +238,6 @@ class IpFilter(object):
         if (m := self.pCountry.search(area := self.getArea(ip))):
             return m.group(0)
         return area
-
 
     def clear(self):
         self.q.clear()
@@ -317,6 +315,7 @@ class LaunchProxyMix(object):
         nc = NodeConfig()
         settings = nc.genConfig[node.proto](node)
         if test_mode == True:
+            settings['inbounds'].pop()  # 删除http2
             settings['inbounds'].pop()  # 删除socks
             settings['inbounds'][0]['listen'] = '127.0.0.1'
             settings['inbounds'][0]['port'] = port
@@ -1557,7 +1556,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{beforeyesterday.strftime("%y%m")}/{beforeyesterday.strftime("%y%m%d")}.txt',
             f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
             f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
-             'https://mareep.netlify.app/sub/merged_proxies_new.yaml',  # https://github.com/vveg26/chromego_merge
+            'https://mareep.netlify.app/sub/merged_proxies_new.yaml',  # https://github.com/vveg26/chromego_merge
             'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',  # https://github.com/Flik6/getNode
 
             'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml',
@@ -1566,19 +1565,19 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
         ]
         #l_source = ['https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
-        #l_source = l_source[:5]+ l_source[-5:]  # debug only
+        l_source = l_source[:5]+ l_source[-5:]  # debug only
 
         return l_source
 
     def _filterArea(l_node: list[Node]):
-        f = IpFilter(qqwry_path)
+        f = Ip2Area(qqwry_path)
         l_node = [_n for _n in l_node if _n.real_ip and not f.isMainland(_n.real_ip)]
         f.clear()
         info(f'after area filter, remain {len(l_node):,} node(s)')
         return l_node
 
     def statCountry(self, l_ip: list[Node]) -> Counter:
-        f = IpFilter(qqwry_path)
+        f = Ip2Area(qqwry_path)
         c = Counter(f.getCountry(x.real_ip) for x in l_ip)
         return c
 
@@ -1772,10 +1771,16 @@ class NodeConfig(object):
 
     def doInboundSetting(self):
         setting = deepcopy(inboundsSetting)
-        setting[0]['listen'] = proxy_host
+        # http with auth
+# #        setting[0]['listen'] = proxy_host
         setting[0]['port'] = proxy_port
         setting[0]['settings']['accounts'][0]['user'] = proxy_user
         setting[0]['settings']['accounts'][0]['pass'] = proxy_pass
+        # socks, no auth
+# #        setting[1]['listen'] = proxy_host
+        # http, no auth
+# #        setting[2]['listen'] = proxy_host
+        setting[2]['port'] = proxy_port + 1
         return setting
 
     def do_vmess(self, node: Node) -> tuple[dict, dict]:
@@ -1863,9 +1868,9 @@ class NodeConfig(object):
         assert node.proto == 'hysteria'
         arg = node.param
         settings = deepcopy(settingHysteria)
-        settings['http']['listen'] = f'{proxy_host}:{proxy_port}'
-        settings['http']['user'] = proxy_user
-        settings['http']['password'] = proxy_pass
+# #        settings['http']['listen'] = f'{proxy_host}:{proxy_port}'
+# #        settings['http']['user'] = proxy_user
+# #        settings['http']['password'] = proxy_pass
         if 'ports' in arg:
             settings['server'] = f'{arg["server"]}:{arg["ports"]}'
         else:
@@ -1887,10 +1892,10 @@ class NodeConfig(object):
         assert node.proto == 'hysteria2'
         arg = node.param
         settings = deepcopy(settingHysteria2)
-        settings['http']['listen'] = f'{proxy_host}:{proxy_port}'
-        settings['http']['username'] = proxy_user
-        settings['http']['password'] = proxy_pass
-        settings['http']['realm'] = 'need pass'
+# #        settings['http']['listen'] = f'{proxy_host}:{proxy_port}'
+# #        settings['http']['username'] = proxy_user
+# #        settings['http']['password'] = proxy_pass
+# #        settings['http']['realm'] = 'need pass'
         settings['server'] = f'{arg["server"]}:{arg["port"]}'
         settings['server_name'] = arg['name']
         settings['auth'] = arg['auth']
