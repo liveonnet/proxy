@@ -39,6 +39,7 @@
 # 20230105 完善安国别统计相关逻辑，不再按alias过滤，使用赋值表达式简化代码
 # 20230108 代理开启proxy_port+1无密码服务，方便pac使用；目前hysteria/2还不支持多http监听
 #          暂时只使用10个来源的节点，减少评估时间
+# 20231010 启用uvloop
 
 import binascii
 from base64 import b64decode, b64encode
@@ -57,7 +58,7 @@ from aiohttp_socks import ProxyType, ProxyConnector
 import asyncio
 # 貌似还是有警告
 #setattr(asyncio.sslproto._SSLProtocolTransport, "_start_tls_compatible", True)
-#import uvloop
+import uvloop
 import sys
 import io
 import os
@@ -71,12 +72,10 @@ from time import time
 import ssl
 import certifi
 from collections import defaultdict
-#import pprint
 import json
 from pathlib import PurePath
 from copy import deepcopy
 from urllib.parse import urlparse, unquote_plus, parse_qs, urlunparse, quote
-#from aiohttp_socks import ProxyType, ProxyConnector, ChainProxyConnector
 from dataclasses import dataclass
 import socket
 import codecs
@@ -90,7 +89,6 @@ import httpx
 from qqwry import QQwry
 from dns.asyncresolver import Resolver
 import dns.resolver
-#from lxml import etree
 from functools import partial
 from logging import INFO, DEBUG
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt, wait_random, retry_if_result, before_sleep_log, retry_if_exception_type, TryAgain
@@ -115,7 +113,7 @@ from make_proxy_conf import inboundsSetting, outboundsSetting_vmess, outboundsSe
 from make_proxy_conf import settingHysteria , settingHysteria2
 from make_proxy_conf import qqwry_path
 event_exit = asyncio.Event()
-CTRL_C_TIME = 0
+CTRL_C_TIME: float = 0  # 记录最近一次按Ctrl+C的时间
 
 
 @dataclass
@@ -451,7 +449,6 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
             try:
                 node = queue.get_nowait()
                 try:
-# #                    ping, nr_succ = await self._popen_conn(node, port, client)
                     ping, nr_succ = await self._popen_conn(node, port, client)
                     if ping >= 9999999 or nr_succ < self.nr_min_succ:
                         ping = None
@@ -1378,8 +1375,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             #debug(f'batch [{idx}: {idx+batch}] need query {len(l_host)} host(s)')
 
             l_cor = [rs.resolve_name(x.ip, socket.AF_INET, lifetime=timeout) for x in l_host]
-            l_rslt = await asyncio.gather(*l_cor, return_exceptions=True)
-            for i, x in enumerate(l_rslt):
+            for i, x in enumerate(l_rslt := await asyncio.gather(*l_cor, return_exceptions=True)):
                 if isinstance(x, dns.resolver.HostAnswers):
                     l_host[i].real_ip = next(x.addresses())  # 只取第一个地址
 # #                elif isinstance(x, dns.resolver.NXDOMAIN):  # 域名解析失败
@@ -1427,8 +1423,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
                 debug(f'do select with {len(d)} registered.')
                 while 1:
-                    l_events = sel.select(timeout)
-                    if not l_events:
+                    if not (l_events := sel.select(timeout)):
                         break
                     for _k, _events in l_events:
                         if _events & selectors.EVENT_READ or _events & selectors.EVENT_WRITE:
@@ -1456,30 +1451,6 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         break
 
 # #                debug(f'batch {succ=} {bad=}')
-
-        return l_ret
-    
-    async def _filterBySimple(l: list[Node], timeout: int=3, batch: int=100) -> list:
-        """通过判断连通性过滤节点
-        """
-        idx, nr, l_ret = 0, len(l), []
-        while idx <= nr:
-            #debug(f'batch [{idx}: {idx+batch})')
-            l_cor = [asyncio.wait_for(asyncio.open_connection(x.ip, int(x.port), limit=8), timeout) for x in l[idx: idx+batch]]
-            l_rslt = await asyncio.gather(*l_cor, return_exceptions=True)
-
-            for i, x in enumerate(l_rslt):
-                if isinstance(x, tuple):
-                    _, w = x
-                    #debug(f'{l[idx+i]} passed')
-                    w.close()
-                    try:
-                        await w.wait_closed()
-                    except Exception as e:
-                        warn(f'got except when wait_closed, {type(e)}, {e}')
-
-            l_ret.extend(compress(l[idx: idx+batch], [isinstance(x, tuple) for x in l_rslt]))
-            idx += batch
 
         return l_ret
 
@@ -1563,9 +1534,10 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
+            'https://telegeam.github.io/blog1/a/2024/1/20240110.txt',
         ]
         #l_source = ['https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
-        l_source = l_source[:5]+ l_source[-5:]  # debug only
+# #        l_source = l_source[:5]+ l_source[-5:]  # debug only
 
         return l_source
 
@@ -1617,7 +1589,6 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         l_node = l_uniq
         info(f'after remove duplicate, remain {len(l_node):,} node(s)')
         st_all_source = set(chain.from_iterable(map(attrgetter('source'), l_node)))  # stat 不同来源的同一个节点累计计算
-        #l_node = await self.__class__._filterBySimple(l_node, timeout=5, batch=800)
         debug(f'STAT source_cnt: {Counter((len(x.source) for x in l_node)).most_common()}')  # 按节点的来源数统计
 
         #with open('/tmp/dbg_nodes', 'w') as fo:
@@ -1957,6 +1928,7 @@ async def test():
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt',
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
+# #            'https://telegeam.github.io/blog1/a/2024/1/20240110.txt',
             ]
 #
     l_rslt = await asyncio.gather(*[x._parseNodeData(_x) for _x in l_source])
@@ -2046,13 +2018,13 @@ async def test():
 
 
 if __name__ == '__main__':
-    #asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     parser = argparse.ArgumentParser(prog='make_proxy.py')
     parser.add_argument('-t', '--test', action='store_true', help='in test mode')
     args = parser.parse_args()
     if args.test:
         warn(f'{"-"*10} IN TEST MODE {"-"*10}')
-        asyncio.run(test())
+        asyncio.run(test(), debug=True)
     else:
         info(f'{"-"*10} IN PROD MODE {"-"*10}')
         asyncio.run(main())
