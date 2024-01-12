@@ -216,6 +216,7 @@ class Ip2Area(object):
     '''
     p = re.compile('中国|北京|上海|重庆|天津|本机|局域|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|内蒙古|广西|西藏|宁夏|新疆|香港|澳门', re.U)
     pCountry = re.compile('中国|欧盟|蒙古|朝鲜|韩国|日本|菲律宾|越南|老挝|柬埔寨|缅甸|泰国|马来西亚|文莱|新加坡|印度尼西亚|东帝汶|尼泊尔|不丹|孟加拉国|印度|巴基斯坦|斯里兰卡|马尔代夫|哈萨克斯坦|吉尔吉斯斯坦|塔吉克斯坦|乌兹别克斯坦|土库曼斯坦|阿富汗|伊拉克|伊朗|叙利亚|约旦|黎巴嫩|以色列|巴勒斯坦|沙特阿拉伯|巴林|卡塔尔|科威特|阿拉伯联合酋长国|阿曼|也门|格鲁吉亚|亚美尼亚|阿塞拜疆|土耳其|塞浦路斯|芬兰|瑞典|挪威|冰岛|丹麦|法罗群岛|爱沙尼亚|拉脱维亚|立陶宛|白俄罗斯|俄罗斯|乌克兰|摩尔多瓦|波兰|捷克|斯洛伐克|匈牙利|德国|奥地利|瑞士|列支敦士登|英国|爱尔兰|荷兰|比利时|卢森堡|法国|摩纳哥|罗马尼亚|保加利亚|塞尔维亚|马其顿|阿尔巴尼亚|希腊|斯洛文尼亚|克罗地亚|波斯尼亚和墨塞哥维那|意大利|梵蒂冈|圣马力诺|马耳他|西班牙|葡萄牙|安道尔|埃及|利比亚|苏丹|突尼斯|阿尔及利亚|摩洛哥|亚速尔群岛|马德拉群岛|埃塞俄比亚|厄立特里亚|索马里|吉布提|肯尼亚|坦桑尼亚|乌干达|卢旺达|布隆迪|塞舌尔|乍得|中非|喀麦隆|赤道几内亚|加蓬|刚果共和国|刚果民主共和国|圣多美及普林西比|毛里塔尼亚|西撒哈拉|塞内加尔|冈比亚|马里|布基纳法索|几内亚|几内亚比绍|佛得角|塞拉利昂|利比里亚|科特迪瓦|加纳|多哥|贝宁|尼日尔|加那利群岛|赞比亚|安哥拉|津巴布韦|马拉维|莫桑比克|博茨瓦纳|纳米比亚|南非|斯威士兰|莱索托|马达加斯加|科摩罗|毛里求斯|留尼旺|圣赫勒拿|澳大利亚|新西兰|巴布亚新几内亚|所罗门群岛|瓦努阿图|密克罗尼西亚|马绍尔群岛|帕劳|瑙鲁|基里巴斯|图瓦卢|萨摩亚|斐济群岛|汤加|库克群岛|关岛|新喀里多尼亚|法属波利尼西亚|皮特凯恩岛|瓦利斯与富图纳|纽埃|托克劳|美属萨摩亚|北马里亚纳|加拿大|美国|墨西哥|格陵兰|危地马拉|伯利兹|萨尔瓦多|洪都拉斯|尼加拉瓜|哥斯达黎加|巴拿马|巴哈马|古巴|牙买加|海地|多米尼加共和国|安提瓜和巴布达|圣基茨和尼维斯|多米尼克|圣卢西亚|圣文森特和格林纳丁斯|格林纳达|巴巴多斯|特立尼达和多巴哥|波多黎各|英属维尔京群岛|美属维尔京群岛|安圭拉|蒙特塞拉特|瓜德罗普|马提尼克|荷属安的列斯|阿鲁巴|特克斯和凯科斯群岛|开曼群岛|百慕大|哥伦比亚|委内瑞拉|圭亚那|法属圭亚那|苏里南|厄瓜多尔|秘鲁|玻利维亚|巴西|智利|阿根廷|乌拉圭|巴拉圭|台湾', re.U)
+    pPreferredArea = re.compile('美国|日本|亚太地区|台湾|韩国|英国|德国|荷兰|瑞典|新加坡|澳大利亚|菲律宾|乌克兰|俄罗斯', re.U)
 
     def __init__(self, qqwry_path: str):
         self.q = QQwry()
@@ -229,11 +230,16 @@ class Ip2Area(object):
         '''
         return True if self.p.search(self.getArea(ip)) else False
 
+    def isPreferredArea(self, ip: str) -> bool:
+        '''是否为优先使用的地区
+        '''
+        return True if self.pPreferredArea.match(self.getCountry(ip)) else False
+
     def getCountry(self, ip: str) -> str:
         '''将国家地区精简为国家 例如 `美国华盛顿` 精简为 `美国`
         欧盟、台湾也算
         '''
-        if (m := self.pCountry.search(area := self.getArea(ip))):
+        if (m := self.pCountry.match(area := self.getArea(ip))):
             return m.group(0)
         return area
 
@@ -261,7 +267,7 @@ class ProxySupportMix(object):
 
     def __init__(self):
         self.headers = headers
-        self.timeout = aiohttp.ClientTimeout(total=30.0, connect=10.0, sock_connect=15.0, sock_read=20.0)
+        self.timeout = aiohttp.ClientTimeout(total=60.0, connect=10.0, sock_connect=15.0, sock_read=30.0)
         self.sslcontext = ssl.create_default_context(cafile=certifi.where())
         self.connector = aiohttp.TCPConnector(force_close=True, limit=500, limit_per_host=0, enable_cleanup_closed=True, loop=None, ssl=self.sslcontext)
         self.client = aiohttp.ClientSession(headers=headers, timeout=self.timeout, connector=self.connector, connector_owner=True)
@@ -427,21 +433,6 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
     async def __aexit__(self, exc_type, exc, tb):
         await self.clean()
         return False
-
-#-#    async def connection_test_old(self, l_node: list[Node]) -> list[Node]:
-#-#        port_lock = {port: asyncio.Lock() for port in self.port_range}
-#-#
-#-#        task_list = []
-#-#        for i, node in enumerate(l_node, 1):
-#-#            port = random.choice(list(port_lock.keys()))
-#-#            task = asyncio.create_task(self._try_connect(node, port, port_lock[port]))
-#-#            task_list.append(task)
-#-#        if task_list:
-#-#            await asyncio.wait(task_list)
-#-#
-#-#        l_node = [x for x in l_node if x.is_connected]
-#-#        l_node.sort(key=lambda x: x.score)
-#-#        return l_node
 
     async def _conn_test_worker(self, worker_name: str, port: int, queue: asyncio.Queue) -> list[Node]:
         client = httpx.AsyncClient(headers=headers, verify=False, timeout=self.timeout, proxies=f'http://127.0.0.1:{port}')
@@ -667,27 +658,6 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
                     break
             await asyncio.sleep(self.interval)
         return score, nr_succ
-#-#
-#-#    async def _try_connect(self, node: Node, port: int, port_lock: asyncio.Lock):
-#-#        node.score = None
-#-#        if node.protocol == 'http':
-#-#            ping, nr_succ = await self._http_connect(node)
-#-#        elif node.protocol == 'socks':
-#-#            ping, nr_succ = await self._socks_connect(node)
-#-#        else:
-#-#            async with port_lock:
-#-#                ping, nr_succ = await self._popen_connect(node, port)
-#-#        if ping >= 9999999:
-#-#            ping = None
-#-#        if nr_succ < self.nr_min_succ:
-#-#            ping = None
-#-#        if ping:
-#-#            info(f'conn succ {ping}{self.unit} {node} {node.alias}')
-#-#        else:
-#-#            pass
-#-#            #debug(f'connect failed for {node}')
-#-#        node.score = ping
-#-#        node.score_unit = self.unit
 
 
 class NodeProcessor(ProxySupportMix, LaunchProxyMix):
@@ -763,7 +733,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             warn(f'got error when add vmess node {e} {_param=} {url=}')
                 case 'ssr':  # 不支持ssr
                     pass
-                case 'trojan': # <password>@<ip>:<port>?<extra>#<alias>
+                case 'trojan': # <password>@<ip>:<port>?security=<>&sni=<>&type=<>&headerType=<>#<alias>
                     try:
                         _tmp, _ip, _port = re.split(':|@', m.netloc, 2)
                         _uuid = _tmp.decode() if type(_tmp) is bytes else _tmp
@@ -829,7 +799,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         except Exception as e:
                             warn(f'error parse {e}, {_node=}, {url=}')
 
-                case 'vless':  # <uuid>@<ip>:<port>?<extra>#<alias>
+                case 'vless':  # <uuid>@<ip>:<port>?encryption=<>&security=<>&sni=<>&type=<>&host=<>&path=<>#<alias>
                     try:
                         _uuid, _ip, _port = re.split(':|@', m.netloc, 2)
                         _extra = parse_qs(m.query) if m.query else {}
@@ -838,6 +808,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         #debug(f'vless:{_node}')
                         if 'path' not in _extra:
                             _extra['path'] = '/'
+                        if 'security' not in _extra:
+                            _extra['security'] = None
                         if 'type' not in _extra:
                             debug(f'parse vless, no \'type\' in _extra, {url=}')
                             continue
@@ -987,29 +959,14 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             warn('url and data both empty !')
             return []
 
+        if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes':
+# #            debug('特殊处理Mineral')
+            r = b64encode(r.encode())
+
         # 特殊处理
         if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt' or url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt' or url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt':
 #-#            debug('特殊处理yudou66')
-#-#            l_tmp = (x for x in r.split('\n') if x)
-#-#            for _l in l_tmp:
-#-#                _up = urlparse(_l)
-#-#                match _up.scheme:
-#-#                    case 'vless':
-#-#                        # vless://<uuid>@<server>:<port>?encryption=<>&security=<>&sni=<>&type=<>&host=<>&path=<>#<alias>
-#-#                        pass
-#-#                    case 'vmess':
-#-#                        # vmess://base64(json(data))
-#-#                        pass
-#-#                    case 'ss':
-#-#                        # ss://base64(<method>:<password>)@<server>:<port>#<alias>
-#-#                        pass
-#-#                    case 'trojan':
-#-#                        # trojan://<password>@<server>:<port>?security=<>&sni=<>&type=<>&headerType=<>#<alias>
-#-#                        pass
-#-#                    case _:
-#-#                        debug(f'未处理协议 {_up.scheme}')
             r = b64encode(r.encode())
-
 
         # 特殊处理
         if url == 'https://mareep.netlify.app/sub/merged_proxies_new.yaml':
@@ -1535,6 +1492,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
             'https://telegeam.github.io/blog1/a/2024/1/20240110.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mheidari98/.proxy/main/all',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes',
         ]
         #l_source = ['https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
 # #        l_source = l_source[:5]+ l_source[-5:]  # debug only
@@ -1543,7 +1502,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
     def _filterArea(l_node: list[Node]):
         f = Ip2Area(qqwry_path)
-        l_node = [_n for _n in l_node if _n.real_ip and not f.isMainland(_n.real_ip)]
+        l_node = [_n for _n in l_node if _n.real_ip and f.isPreferredArea(_n.real_ip)]
         f.clear()
         info(f'after area filter, remain {len(l_node):,} node(s)')
         return l_node
@@ -1601,9 +1560,6 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         if event_exit.is_set():
             warn('got exit event')
             return []
-# #        # 过滤掉中国节点
-# #        l_node = list(filter(lambda x: x.alias.find('中国') == -1 and x.alias.find('CN') == -1, l_node))
-# #        info(f'after cn filter, remain {len(l_node):,} node(s)')
         st_now_source = set(chain.from_iterable(map(attrgetter('source'), l_node)))  # stat
         warn(f'bad source: {st_all_source - st_now_source}')  # 连一个可连(不见得可用)节点都没有的来源
 
@@ -1625,6 +1581,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 del alt_node[:]
                 l_node = await self._getNodeList(from_source)  # get node list
                 d_source_cnt = dict(Counter(chain.from_iterable(_x.source for _x in l_node)).most_common())  # stat
+                debug(f'STAT area {self.statCountry(l_node).most_common()}')
                 # check avaliable
                 info(f'total {len(l_node):,} node(s) to test')
                 begin = time()
@@ -1743,14 +1700,10 @@ class NodeConfig(object):
     def doInboundSetting(self):
         setting = deepcopy(inboundsSetting)
         # http with auth
-# #        setting[0]['listen'] = proxy_host
         setting[0]['port'] = proxy_port
         setting[0]['settings']['accounts'][0]['user'] = proxy_user
         setting[0]['settings']['accounts'][0]['pass'] = proxy_pass
-        # socks, no auth
-# #        setting[1]['listen'] = proxy_host
-        # http, no auth
-# #        setting[2]['listen'] = proxy_host
+        # http without auth
         setting[2]['port'] = proxy_port + 1
         return setting
 
@@ -1764,7 +1717,7 @@ class NodeConfig(object):
         outboundsSetting[0]['settings']['vnext'][0]['users'][0]['alterId'] = int((arg['aid'] or '0') if 'aid' in arg else 64)
         outboundsSetting[0]['streamSettings']['wsSettings']['path'] = arg['path']
         outboundsSetting[0]['streamSettings']['wsSettings']['headers'] = {} if not arg['host'] else {'Host': arg['host'], }
-        outboundsSetting[0]['streamSettings']['security'] = arg['tls'] or 'none'
+        outboundsSetting[0]['streamSettings']['security'] = arg.get('tls', 'none')
         setting = deepcopy(conf_tpl)
         setting['inbounds'] = self.doInboundSetting()
         setting['outbounds'] = outboundsSetting
@@ -1839,9 +1792,6 @@ class NodeConfig(object):
         assert node.proto == 'hysteria'
         arg = node.param
         settings = deepcopy(settingHysteria)
-# #        settings['http']['listen'] = f'{proxy_host}:{proxy_port}'
-# #        settings['http']['user'] = proxy_user
-# #        settings['http']['password'] = proxy_pass
         if 'ports' in arg:
             settings['server'] = f'{arg["server"]}:{arg["ports"]}'
         else:
@@ -1863,10 +1813,6 @@ class NodeConfig(object):
         assert node.proto == 'hysteria2'
         arg = node.param
         settings = deepcopy(settingHysteria2)
-# #        settings['http']['listen'] = f'{proxy_host}:{proxy_port}'
-# #        settings['http']['username'] = proxy_user
-# #        settings['http']['password'] = proxy_pass
-# #        settings['http']['realm'] = 'need pass'
         settings['server'] = f'{arg["server"]}:{arg["port"]}'
         settings['server_name'] = arg['name']
         settings['auth'] = arg['auth']
@@ -1927,8 +1873,10 @@ async def test():
 # #            'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml',
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt',
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
-            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
+# #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
 # #            'https://telegeam.github.io/blog1/a/2024/1/20240110.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mheidari98/.proxy/main/all',
+# #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes',
             ]
 #
     l_rslt = await asyncio.gather(*[x._parseNodeData(_x) for _x in l_source])
@@ -1996,6 +1944,7 @@ async def test():
 
     pp = pprint.PrettyPrinter(indent=2, width=80, compact=True, sort_dicts=False)
 
+    debug(f'STAT area {x.statCountry(l_node).most_common()}')
     async with ProxyTest(port_range=port_range, nr_try=2, min_resp_count=2, interval=3, timeout=5) as at:
         l_tested = await at.connection_test(l_node)
         if l_node:
