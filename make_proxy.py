@@ -422,6 +422,8 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
         self.nr_try = nr_try  # 每个代理测试次数
         self.nr_min_succ = min_resp_count  # 每个代理测试连通的阈值，达到阈值认为代理可用
         self.timeout = timeout # 连接超时
+        self.o_limits = httpx.Limits(max_keepalive_connections=30, max_connections=None, keepalive_expiry=5)
+        self.o_timeout = httpx.Timeout(connect=8.0, read=5.0, write=5.0, pool=2.0)
         self.interval = interval  # 代理每次测试之间的休眠时间
 # #        self.urls = urls or ['https://www.google.com/', 'https://www.youtube.com/' ]  # 用于连通测试的目标站点，能访问到认为是连通
         self.urls = urls or ['https://www.youtube.com/', ]  # 用于连通测试的目标站点，能访问到认为是连通
@@ -435,7 +437,7 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
         return False
 
     async def _conn_test_worker(self, worker_name: str, port: int, queue: asyncio.Queue) -> list[Node]:
-        client = httpx.AsyncClient(headers=headers, verify=False, timeout=self.timeout, proxies=f'http://127.0.0.1:{port}')
+        client = httpx.AsyncClient(headers=headers, verify=False, timeout=self.o_timeout, limits=self.o_limits, proxies=f'http://127.0.0.1:{port}')
         while True:
             try:
                 node = queue.get_nowait()
@@ -1095,7 +1097,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
 
         # 特殊处理
-        if url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml':
+        if url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml' or url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_trojan.yml':
             full_content = yaml.load(r, yaml.FullLoader)
             proxies = full_content.get('proxies')
             l_node = []
@@ -1103,9 +1105,9 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 try:
                     _param = {
                             'host': _x['server'],
-                            'id': _x['uuid'],
+                            'id': _x.get('uuid', ''),
                             'port': _x['port'],
-                            'aid': _x['alterId'],
+                            'aid': _x.get('alterId', ''),
                             'tls': _x.get('tls', None),
 # #                            'path': _x['ws-opts']['path'] if 'ws-opts' in _x and 'path' in _x['ws-opts'] else '/',
                             'path': _x.get('ws-opts', {}).get('path', '/'),
@@ -1365,8 +1367,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 # #                debug(f'connect_ex and register [{idx}:]...')
                 for x in l[idx: ]:
                     idx += 1
-                    # 域名无法解析出ip的直接算失败，过滤掉
-                    if not x.real_ip:
+                    # 域名无法解析出ip的直接算失败，端口号错误直接算失败, 过滤掉
+                    if (not x.real_ip) or (not 65535 >= int(x.port) >= 0):
                         bad += 1
                         continue
 
@@ -1462,6 +1464,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             #'https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt',
             'https://raw.fastgit.org/learnhard-cn/free_proxy_ss/main/free',
             'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml',
+            'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_trojan.yml',
             'https://raw.fastgit.org/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',
             'https://raw.fastgit.org/ZywChannel/free/main/sub',
             'https://raw.fastgit.org/free18/v2ray/main/v2ray.txt',
@@ -1875,8 +1878,9 @@ async def test():
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
 # #            'https://telegeam.github.io/blog1/a/2024/1/20240110.txt',
-            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mheidari98/.proxy/main/all',
+# #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mheidari98/.proxy/main/all',
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes',
+            'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_trojan.yml',
             ]
 #
     l_rslt = await asyncio.gather(*[x._parseNodeData(_x) for _x in l_source])
