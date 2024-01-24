@@ -1067,7 +1067,11 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             r = b64encode('\n'.join(l_new).encode()).decode()
 
         # 特殊处理
-        if url == 'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml':
+        if url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml' or \
+           url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_trojan.yml' or \
+           url == 'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zhangkaiitugithub/passcro/main/speednodes.yaml' or \
+           url == 'https://anaer.github.io/Sub/clash.yaml':
             full_content = yaml.load(r, yaml.FullLoader)
             proxies = full_content.get('proxies')
             l_node = []
@@ -1087,6 +1091,10 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     }
                     if _x['type'] == 'ss':
                         _param['method'] = _x['cipher']
+                    if _x['type'] == 'vless':
+                        _param['security'] = _x['tls']
+                    if _x['type'] == 'trojan':
+                        _param['allowInsecure'] = _x.get('skip-cert-verify', True)
                     _param = {**_param, **_x}
                     l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
                 except Exception as e:
@@ -1095,82 +1103,56 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             debug(f'got {len(l_node)} record(s) from {url}')
             return l_node
 
-
-        # 特殊处理
-        if url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml' or url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_trojan.yml':
-            full_content = yaml.load(r, yaml.FullLoader)
-            proxies = full_content.get('proxies')
-            l_node = []
-            for _x in proxies:
-                try:
-                    _param = {
-                            'host': _x['server'],
-                            'id': _x.get('uuid', ''),
-                            'port': _x['port'],
-                            'aid': _x.get('alterId', ''),
-                            'tls': _x.get('tls', None),
-# #                            'path': _x['ws-opts']['path'] if 'ws-opts' in _x and 'path' in _x['ws-opts'] else '/',
-                            'path': _x.get('ws-opts', {}).get('path', '/'),
-                            'host': _x.get('ws-opts', {}).get('headers', {}).get('host', {})
-                    }
-                    _param = {**_param, **_x}
-                    l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
-                except Exception as e:
-                    warn(f'decode failed for {url} {e=} {_x=}')
-                    continue
-            debug(f'got {len(l_node)} record(s) from {url}')
-            return l_node
-
-        if url == 'https://anaer.github.io/Sub/clash.yaml':
-            full_content = yaml.load(r, yaml.FullLoader)
-            proxies = full_content.get('proxies')
-            l_node = []
-            for _x in proxies:
-                try:
-                    match _x['type']:
-                        case 'vmess':
-                            _param = {
-                                    'host': _x['server'],
-                                    'id': _x['uuid'],
-                                    'port': _x['port'],
-                                    'aid': _x['alterId'],
-                                    'tls': _x.get('tls', None),
-    # #                            'path': _x['ws-opts']['path'] if 'ws-opts' in _x and 'path' in _x['ws-opts'] else '/',
-                                    'path': _x.get('ws-opts', {}).get('path', '/'),
-                                    'host': _x.get('ws-opts', {}).get('headers', {}).get('host', {})
-                            }
-                            _param = {**_param, **_x}
-                            l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
-                        case 'vless':  # {'name': '加拿大 336', 'port': 443, 'server': '172.67.96.59', 'skip-cert-verify': False, 'tfo': False, 'tls': True, 'type': 'vless', 'uuid': 'b0138d55-a493-4dc3-9932-c6f0391707c1'}
-                            _param = {
-                                    'host': _x['server'],
-                                    'id': _x['uuid'],
-                                    'port': _x['port'],
-                                    'path': _x.get('ws-opts', {}).get('path', '/'),
-                                    'security': _x['tls'],
-                                    'sni': _x.get('sni', None),
-                                    'flow': _x.get('flow', None),
-                            }
-                            _param = {**_param, **_x}
-                            l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
-                        case 'trojan':
-                            _param = {
-                                    'host': _x['server'],
-                                    'port': _x['port'],
-                                    'password': _x['password'],
-                                    'allowInsecure': _x.get('skip-cert-verify', True),
-                                    'sni': _x['sni'],  # unused
-                                    'network': _x['network'],  # unused
-                                    'upd': _x.get('udp', False),  # unused
-                                    }
-                            l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
-                        case _:
-                            error(f'unused node type {_x["type"]}')
-                except Exception as e:
-                    warn(f'decode failed for {url} {e=} {_x=}')
-                    continue
-            debug(f'got {len(l_node)} record(s) from {url}')
-            return l_node
+#-#        if url == 'https://anaer.github.io/Sub/clash.yaml':
+#-#            full_content = yaml.load(r, yaml.FullLoader)
+#-#            proxies = full_content.get('proxies')
+#-#            l_node = []
+#-#            for _x in proxies:
+#-#                try:
+#-#                    match _x['type']:
+#-#                        case 'vmess':
+#-#                            _param = {
+#-#                                    'host': _x['server'],
+#-#                                    'id': _x['uuid'],
+#-#                                    'port': _x['port'],
+#-#                                    'aid': _x['alterId'],
+#-#                                    'tls': _x.get('tls', None),
+#-#    # #                            'path': _x['ws-opts']['path'] if 'ws-opts' in _x and 'path' in _x['ws-opts'] else '/',
+#-#                                    'path': _x.get('ws-opts', {}).get('path', '/'),
+#-#                                    'host': _x.get('ws-opts', {}).get('headers', {}).get('host', {})
+#-#                            }
+#-#                            _param = {**_param, **_x}
+#-#                            l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
+#-#                        case 'vless':  # {'name': '加拿大 336', 'port': 443, 'server': '172.67.96.59', 'skip-cert-verify': False, 'tfo': False, 'tls': True, 'type': 'vless', 'uuid': 'b0138d55-a493-4dc3-9932-c6f0391707c1'}
+#-#                            _param = {
+#-#                                    'host': _x['server'],
+#-#                                    'id': _x['uuid'],
+#-#                                    'port': _x['port'],
+#-#                                    'path': _x.get('ws-opts', {}).get('path', '/'),
+#-#                                    'security': _x['tls'],
+#-#                                    'sni': _x.get('sni', None),
+#-#                                    'flow': _x.get('flow', None),
+#-#                            }
+#-#                            _param = {**_param, **_x}
+#-#                            l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
+#-#                        case 'trojan':
+#-#                            _param = {
+#-#                                    'host': _x['server'],
+#-#                                    'port': _x['port'],
+#-#                                    'password': _x['password'],
+#-#                                    'allowInsecure': _x.get('skip-cert-verify', True),
+#-#                                    'sni': _x['sni'],  # unused
+#-#                                    'network': _x['network'],  # unused
+#-#                                    'upd': _x.get('udp', False),  # unused
+#-#                                    }
+#-#                            l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
+#-#                        case _:
+#-#                            error(f'unused node type {_x["type"]}')
+#-#                except Exception as e:
+#-#                    warn(f'decode failed for {url} {e=} {_x=}')
+#-#                    continue
+#-#            debug(f'got {len(l_node)} record(s) from {url}')
+#-#            return l_node
 
         if not (s := b64d(r, url)):
             error(f'decode failed {url} for {r[:100]}')
@@ -1497,6 +1479,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://telegeam.github.io/blog1/a/2024/1/20240110.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mheidari98/.proxy/main/all',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zhangkaiitugithub/passcro/main/speednodes.yaml',
         ]
         #l_source = ['https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
 # #        l_source = l_source[:5]+ l_source[-5:]  # debug only
@@ -1880,7 +1863,8 @@ async def test():
 # #            'https://telegeam.github.io/blog1/a/2024/1/20240110.txt',
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mheidari98/.proxy/main/all',
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes',
-            'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_trojan.yml',
+# #            'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_trojan.yml',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zhangkaiitugithub/passcro/main/speednodes.yaml',
             ]
 #
     l_rslt = await asyncio.gather(*[x._parseNodeData(_x) for _x in l_source])
