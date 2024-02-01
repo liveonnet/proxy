@@ -735,6 +735,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             warn(f'got error when add vmess node {e} {_param=} {url=}')
                 case 'ssr':  # 不支持ssr
                     pass
+                case 'tuic':  # 不支持tuic
+                    pass
                 case 'trojan': # <password>@<ip>:<port>?security=<>&sni=<>&type=<>&headerType=<>#<alias>
                     try:
                         _tmp, _ip, _port = re.split(':|@', m.netloc, 2)
@@ -961,13 +963,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             warn('url and data both empty !')
             return []
 
-        if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes':
-# #            debug('特殊处理Mineral')
-            r = b64encode(r.encode())
-
         # 特殊处理
-        if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt' or url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt' or url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt':
-#-#            debug('特殊处理yudou66')
+        if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt':
             r = b64encode(r.encode())
 
         # 特殊处理
@@ -1103,56 +1104,6 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             debug(f'got {len(l_node)} record(s) from {url}')
             return l_node
 
-#-#        if url == 'https://anaer.github.io/Sub/clash.yaml':
-#-#            full_content = yaml.load(r, yaml.FullLoader)
-#-#            proxies = full_content.get('proxies')
-#-#            l_node = []
-#-#            for _x in proxies:
-#-#                try:
-#-#                    match _x['type']:
-#-#                        case 'vmess':
-#-#                            _param = {
-#-#                                    'host': _x['server'],
-#-#                                    'id': _x['uuid'],
-#-#                                    'port': _x['port'],
-#-#                                    'aid': _x['alterId'],
-#-#                                    'tls': _x.get('tls', None),
-#-#    # #                            'path': _x['ws-opts']['path'] if 'ws-opts' in _x and 'path' in _x['ws-opts'] else '/',
-#-#                                    'path': _x.get('ws-opts', {}).get('path', '/'),
-#-#                                    'host': _x.get('ws-opts', {}).get('headers', {}).get('host', {})
-#-#                            }
-#-#                            _param = {**_param, **_x}
-#-#                            l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
-#-#                        case 'vless':  # {'name': '加拿大 336', 'port': 443, 'server': '172.67.96.59', 'skip-cert-verify': False, 'tfo': False, 'tls': True, 'type': 'vless', 'uuid': 'b0138d55-a493-4dc3-9932-c6f0391707c1'}
-#-#                            _param = {
-#-#                                    'host': _x['server'],
-#-#                                    'id': _x['uuid'],
-#-#                                    'port': _x['port'],
-#-#                                    'path': _x.get('ws-opts', {}).get('path', '/'),
-#-#                                    'security': _x['tls'],
-#-#                                    'sni': _x.get('sni', None),
-#-#                                    'flow': _x.get('flow', None),
-#-#                            }
-#-#                            _param = {**_param, **_x}
-#-#                            l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
-#-#                        case 'trojan':
-#-#                            _param = {
-#-#                                    'host': _x['server'],
-#-#                                    'port': _x['port'],
-#-#                                    'password': _x['password'],
-#-#                                    'allowInsecure': _x.get('skip-cert-verify', True),
-#-#                                    'sni': _x['sni'],  # unused
-#-#                                    'network': _x['network'],  # unused
-#-#                                    'upd': _x.get('udp', False),  # unused
-#-#                                    }
-#-#                            l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
-#-#                        case _:
-#-#                            error(f'unused node type {_x["type"]}')
-#-#                except Exception as e:
-#-#                    warn(f'decode failed for {url} {e=} {_x=}')
-#-#                    continue
-#-#            debug(f'got {len(l_node)} record(s) from {url}')
-#-#            return l_node
 
         if not (s := b64d(r, url)):
             error(f'decode failed {url} for {r[:100]}')
@@ -1480,6 +1431,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mheidari98/.proxy/main/all',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zhangkaiitugithub/passcro/main/speednodes.yaml',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/yebekhe/V2Hub/main/merged_base64',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt',
         ]
         #l_source = ['https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
 # #        l_source = l_source[:5]+ l_source[-5:]  # debug only
@@ -1864,7 +1817,9 @@ async def test():
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mheidari98/.proxy/main/all',
 # #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes',
 # #            'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_trojan.yml',
-            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zhangkaiitugithub/passcro/main/speednodes.yaml',
+# #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zhangkaiitugithub/passcro/main/speednodes.yaml',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/yebekhe/V2Hub/main/merged_base64',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt',
             ]
 #
     l_rslt = await asyncio.gather(*[x._parseNodeData(_x) for _x in l_source])
