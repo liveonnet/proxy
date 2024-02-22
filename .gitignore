@@ -102,6 +102,7 @@ ENV/
 .ropeproject
 
 make_proxy_conf.py
+get_proxy_conf.py
 t.py
 tt.py
 te.py
