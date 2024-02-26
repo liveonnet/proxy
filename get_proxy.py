@@ -40,9 +40,13 @@
 # 20230108 代理开启proxy_port+1无密码服务，方便pac使用；目前hysteria/2还不支持多http监听
 #          暂时只使用10个来源的节点，减少评估时间
 # 20231010 启用uvloop
-# 20230201 程序结构大改, 并改名为get_proxy, 原来的make_proxy暂时保留。以前是依次执行获取节点、排重、从host取ip，根据地区过滤、socket连接简单过滤、实际连接测试，最后找出所有可用节点，并输出统计信息，然后选择一个节点启用，随着节点数增加，目前至少要等近十分钟才能执行完毕有节点可用，并且备选节点用光后需要重新处理，又要等待近10分钟才能用上。现在改为各步骤并行处理，找到第一个可用节点后马上启用，一般半分钟到一分钟就有节点可用，并且备用节点快用光时就重新获取可用节点，期间不影响当前节点使用且再无需等待新可用节点。代价是无法做统计。
+# 20240109 代理开启proxy_port+1无密码服务，方便pac使用；目前hysteria/2还不支持多http监听; 暂时只使用10个来源的节点，减少评估时间
+# 20240122 改进httpx的pool设置；增加端口号校验
+# 20240124 统一处理clash yaml格式
+# 20240201 程序结构大改, 并改名为get_proxy, 原来的make_proxy暂时保留。以前是依次执行获取节点、排重、从host取ip，根据地区过滤、socket连接简单过滤、实际连接测试，最后找出所有可用节点，并输出统计信息，然后选择一个节点启用，随着节点数增加，目前至少要等近十分钟才能执行完毕有节点可用，并且备选节点用光后需要重新处理，又要等待近10分钟才能用上。现在改为各步骤并行处理，找到第一个可用节点后马上启用，一般半分钟到一分钟就有节点可用，并且备用节点快用光时就重新获取可用节点，期间不影响当前节点使用且再无需等待新可用节点。代价是无法做统计。
 # 20240218 添加节点；完善支持测试模式；可用节点达到10个则清空任务队列避免获取过多节点
 # 20240220 过滤慢速节点，检查时间后面输出ping值
+# 20240226 增加ipv6地址的判断和支持，v6的ip不参与按地区过滤，改进日志，增强vless支持
 
 
 import binascii
@@ -79,7 +83,7 @@ from collections import defaultdict
 import json
 from pathlib import PurePath
 from copy import deepcopy
-from urllib.parse import urlparse, unquote_plus, parse_qs, urlunparse, quote
+from urllib.parse import urlparse, unquote_plus, parse_qs, urlunparse, quote, unquote
 from dataclasses import dataclass
 import socket
 import codecs
@@ -90,6 +94,7 @@ import ipaddress
 import jsonpickle
 import yaml
 import httpx
+import anyio
 from qqwry import QQwry
 from dns.asyncresolver import Resolver
 import dns.resolver
@@ -136,6 +141,7 @@ class Node(object):
     proto: str
     uuid: str = ''
     ip: str = ''
+    v4: bool = True
     port: int = 0
     param: str|list|dict = None  # 包含协议需要的
     alias: str = ''
@@ -493,7 +499,7 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
                 except (httpx.ConnectTimeout, httpx.ReadTimeout) as e:
                     if self.nr_try - i - 1 + nr_succ < self.nr_min_succ:
                         break
-                except (ssl.SSLError, ssl.SSLZeroReturnError, httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.ProxyError) as e:
+                except (ssl.SSLError, ssl.SSLZeroReturnError, httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.ProxyError, anyio.EndOfStream) as e:
 # #                    debug(f'{node} not available {e}')
                     break  # 提前退出
                 except ConnectionAbortedError as e:
@@ -532,6 +538,7 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
             except:
                 pass
 
+# #        debug(f'test {node} got {score=}, {nr_succ=}')
         return score, nr_succ
 
 
@@ -631,20 +638,33 @@ class NodeConfig(object):
 
         outboundsSetting[0]['streamSettings']['network'] = arg['type']
         outboundsSetting[0]['streamSettings']['tlsSettings']['serverName'] = arg.get('sni') or node.ip
+        outboundsSetting[0]['streamSettings']['tlsSettings']['fingerprint'] = arg.get('fp') or ''
 
-        if arg['type'] == 'tcp':
-            del outboundsSetting[0]['streamSettings']['wsSettings']
-            if 'reality-opts' in arg and arg['reality-opts']:
-                # 参考 https://github.com/XTLS/Xray-examples/blob/main/VLESS-TCP-XTLS-Vision-REALITY/config_client.jsonc
-                del outboundsSetting[0]['streamSettings']['tlsSettings']
-                outboundsSetting[0]['streamSettings']['security'] = 'reality'
-                outboundsSetting[0]['streamSettings']['realitySettings']['serverName'] = arg['sni']
-                outboundsSetting[0]['streamSettings']['realitySettings']['fingerprint'] = arg['fingerprint']
-                outboundsSetting[0]['streamSettings']['realitySettings']['publicKey'] = arg['public-key']
-                outboundsSetting[0]['streamSettings']['realitySettings']['shortId'] = arg['short-id']
-        else:  # 'ws'
-            outboundsSetting[0]['streamSettings']['wsSettings']['path'] = arg['path']
-            outboundsSetting[0]['streamSettings']['wsSettings']['headers']['Host'] = arg.get('host', '')
+        match arg['type']:
+            case 'tcp':
+                del outboundsSetting[0]['streamSettings']['wsSettings']
+                if 'reality-opts' in arg and arg['reality-opts']:
+                    # 参考 https://github.com/XTLS/Xray-examples/blob/main/VLESS-TCP-XTLS-Vision-REALITY/config_client.jsonc
+                    del outboundsSetting[0]['streamSettings']['tlsSettings']
+                    outboundsSetting[0]['streamSettings']['security'] = 'reality'
+                    outboundsSetting[0]['streamSettings']['realitySettings']['serverName'] = arg['sni']
+                    outboundsSetting[0]['streamSettings']['realitySettings']['fingerprint'] = arg['fingerprint']
+                    outboundsSetting[0]['streamSettings']['realitySettings']['publicKey'] = arg['public-key']
+                    outboundsSetting[0]['streamSettings']['realitySettings']['shortId'] = arg['short-id']
+            case 'ws':
+                outboundsSetting[0]['streamSettings']['wsSettings']['path'] = arg['path']
+                outboundsSetting[0]['streamSettings']['wsSettings']['headers']['Host'] = arg.get('host', '')
+            case 'grpc':
+                outboundsSetting[0]['streamSettings']['grpcSettings'] = {
+                    'serviceName': unquote(arg.get('serviceName', '')),
+                    'multiMode': False,
+                    'idle_timeout': 60,
+                    'health_check_timeout': 20,
+                    'permit_without_stream': False,
+                    'initial_windows_size': 0
+                    }
+            case _:
+                warn(f'unknown type in vless {arg["type"]}, {node}, {node.param=}, url={node.source}')
 
         if arg['security'] is None or arg['security'] == 'none':
             del outboundsSetting[0]['streamSettings']['security']
@@ -741,7 +761,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         if r.status == 200:
                             content = await r.text()
                         elif r.status == 404:
-                            warn(f'{r.status=} fetching {url=}')
+                            debug(f'{r.status=} fetching {url=}')
                         elif r.status == 429:
                             raise TryAgain
                         else:
@@ -769,6 +789,9 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             match _proto:
                 case 'vmess':  # json(key: <id><add><path><port><host><aid><tls><ps>)
                     tmp = b64d(m.netloc + m.path, url)
+                    if not tmp:
+                        debug('vemss base64 parse failed')
+                        continue
                     try:
                         _param = json.loads(tmp)
                     except Exception as e:
@@ -789,7 +812,16 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     pass
                 case 'trojan': # <password>@<ip>:<port>?security=<>&sni=<>&type=<>&headerType=<>#<alias>
                     try:
-                        _tmp, _ip, _port = re.split(':|@', m.netloc, 2)
+                        _idx1 =m.netloc.rfind(':')
+                        assert _idx1 != -1
+                        _port = m.netloc[_idx1 + 1 :]
+                        _idx2 = m.netloc.find('@')
+                        assert _idx2 != -1
+                        _tmp = m.netloc[:_idx2]
+                        _ip = m.netloc[_idx2 + 1 : _idx1]
+                        if _ip.find('[') != -1 and _ip.find(']') != -1:
+                            _ip = _ip[1:-1]
+                            debug(f'got ipv6 address: {_node} from {url=}')
                         _uuid = _tmp.decode() if type(_tmp) is bytes else _tmp
                         _extra = parse_qs(m.query) if m.query else {}
                         _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
@@ -809,10 +841,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     _s = b64d(m.netloc.encode(), url, False)
                     if not _s:
 # #                    except:  # 非整体base64编码
-                        *_tmp, _ip_port = m.netloc.split('@')
-                        _tmp = ''.join(_tmp)
+                        _tmp, _ip_port = m.netloc.rsplit('@', 1)
+# #                        _tmp = ''.join(_tmp)
                         try:
-                            _ip, _port = _ip_port.split(':', 1)
+                            _ip, _port = _ip_port.rsplit(':', 1)
+                            if _ip.find('[') != -1 and _ip.find(']') != -1:  # ipv6
+                                _ip = _ip[1:-1]
                         except ValueError as e:
                             warn(f'skip one ss node cause got ValueError: {e} {_ip_port=} {_node=} {url=}')
                             continue
@@ -855,7 +889,17 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
                 case 'vless':  # <uuid>@<ip>:<port>?encryption=<>&security=<>&sni=<>&type=<>&host=<>&path=<>#<alias>
                     try:
-                        _uuid, _ip, _port = re.split(':|@', m.netloc, 2)
+                        _idx1 =m.netloc.rfind(':')
+                        assert _idx1 != -1
+                        _port = m.netloc[_idx1 + 1 :]
+                        _idx2 = m.netloc.find('@')
+                        assert _idx2 != -1
+                        _uuid = m.netloc[:_idx2]
+                        _ip = m.netloc[_idx2 + 1 : _idx1]
+                        if _ip.find('[') != -1 and _ip.find(']') != -1:
+                            _ip = _ip[1:-1]
+# #                            debug(f'got ipv6 address: {_node} from {url=}')
+                        #_uuid, _ip, _port = re.split(':|@', m.netloc, 2)
                         _extra = parse_qs(m.query) if m.query else {}
                         _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
                         _alias = unquote_plus(m.fragment)
@@ -865,12 +909,39 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         if 'security' not in _extra:
                             _extra['security'] = None
                         if 'type' not in _extra:
-                            debug(f'parse vless, no \'type\' in _extra, {url=}')
-                            continue
+                            if 'network' in _extra:
+                                _extra['type'] = _extra['network']
+                            else:
+                                debug(f'parse vless, no \'type\' and \'network\' in {_node=}, {url=}')
+                                continue
                         l_node.append(Node(proto=_proto, uuid=_uuid, ip=_ip, port=int(_port), param=_extra, alias=_alias, source=url))
                     except Exception as e:
-                        warn(f'got error when add vless node {e} {m=} {url=}')
-                case 'hysteria2' | 'hy2':  # <auth>@<server>:<port>/?insecure=<insecure>&sni=<sni>#<name>
+                        warn(f'got error when add vless node {e} {_node=} {url=}')
+                case 'hysteria':  # <ip>:<port>?auth=<>&insecure=<>&upmbps=<>&downmbps=<>&alph=<>&obfs=<>&protocol=<>&fastopen=<>#<name>
+                    try:
+                        _ip, _port = m.netloc.rsplit(':', 1)
+                        _alias = unquote(m.fragment)
+                        _extra = parse_qs(m.query) if m.query else {}
+                        _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
+                        _param = {
+                                'name': _alias,
+                                'server': _ip,
+                                'port': int(_port),
+                                'tls_sni': _extra.get('sni', ''),
+                                'tls_insecure': _extra['insecure'],
+                                'alpn': _extra['alpn'],
+                                'auth': _extra['auth'],
+                                'protocol': _extra['protocol'],
+                                'bandwidth_down': _extra['downmbps'],
+                                'bandwidth_up': _extra['upmbps'],
+                                'obfs': _extra.get('obfs', ''),
+                                'fastopen': _extra.get('fastopen', False),
+                                'disable_mtu_discovery': _extra.get('disable_mtu_discovery', True),
+                                }
+                        l_node.append(Node(proto=_proto, uuid=_param['auth'], ip=_param['server'], port=int(_param['port']), param=_param, alias=_param['name'], source=url))
+                    except Exception as e:
+                        warn(f'got error when add hysteria node: {e} {m=} {url=}')
+                case 'hysteria2' | 'hy2':  # <auth>@<server>:<port>/?insecure=<>&sni=<>#<name>
                     try:
                         _auth, _server, _port = re.split(':|@', m.netloc, 2)
                         _extra = parse_qs(m.query) if m.query else {}
@@ -978,7 +1049,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
     async def _tmp_tolinkshare(self, q_out):
         l_node = []
-        url = 'https://raw.fastgit.org/tolinkshare/freenode/main/README.md'
+        url = 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/tolinkshare/freenode/main/README.md'
         if content := await self._getNodeData(url):
             l = re.findall('```(.+?)```', content, re.U|re.M|re.S)
             if l:
@@ -992,7 +1063,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
     async def _tmp_vpnnet(self, q_out):
         l_node = []
-        url = 'https://raw.fastgit.org/VpnNetwork01/vpn-net/main/README.md'
+        url = 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/VpnNetwork01/vpn-net/main/README.md'
         if content := await self._getNodeData(url):
             if l := re.findall('```(.+?)```', content, re.U|re.M|re.S):
                 l_tmp = list(filter(None, chain.from_iterable((x.split('\n') for x in l))))  # filter用于过滤空行
@@ -1003,16 +1074,16 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 for _node in l_node:
                     await q_out.put(_node)
 
-    async def _parseNodeData(self, url: str, data: str=None) -> list[Node]:
+    async def _parseNodeData(self, name: str, url: str, data: str=None) -> list[Node]:
         if url:
             #debug(f'getting {url}')
             if not (r := await self._getNodeData(url)):
-                warn(f'no node data got from {url}')
+                warn(f'{name} no node data got from {url}')
                 return []
         elif data:
             r = data
         else:
-            warn('url and data both empty !')
+            warn('{name} url and data both empty !')
             return []
 
         # 特殊处理
@@ -1021,7 +1092,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt' or \
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt' or \
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt' or \
-           url == 'https://raw.githubusercontent.com/sashalsk/V2Ray/main/V2Config':
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/sashalsk/V2Ray/main/V2Config':
             r = b64encode(r.encode())
 
         # 特殊处理
@@ -1030,7 +1101,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             proxies = full_content.get('proxies')
             l_node = []
             for _x in proxies:
-                match _x['type']:
+                _proto = _x['type']
+                match _proto:
                     case 'tuic':  # 20231115 略过tuic协议
                         continue
                     case 'hysteria':
@@ -1054,7 +1126,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                                 'fastopen': _x.get('fast-open', False),
                                 'disable_mtu_discovery': _x.get('disable_mtu_discovery', True),
                                 }
-                        l_node.append(Node(proto=_x['type'], uuid=_param['auth'], ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
+                        l_node.append(Node(proto=_proto, uuid=_param['auth'], ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
                     case 'hysteria2':
                         _param = {
                                 'server': _x['server'],
@@ -1065,43 +1137,68 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                                 'sni': _x.get('sni', ''),
                                 'tls_insecure': _x['skip-cert-verify'],
                                 }
-                        l_node.append(Node(proto=_x['type'], uuid=_param['auth'], ip=_param['server'], port=int(_param['port']), param=_param, alias=_param['name'], source=url))
+                        l_node.append(Node(proto=_proto, uuid=_param['auth'], ip=_param['server'], port=int(_param['port']), param=_param, alias=_param['name'], source=url))
+                    case 'vmess' | 'vless':
+                        try:
+                            _param = {
+                                    'host': _x['server'],
+                                    'id': _x.get('uuid', ''),
+                                    'port': _x['port'],
+                                    'aid': _x.get('alterId', 0),
+                                    'tls': _x.get('tls', None),
+        # #                            'path': _x['ws-opts']['path'] if 'ws-opts' in _x and 'path' in _x['ws-opts'] else '/',
+                                    'path': _x.get('ws-opts', {}).get('path', '/'),
+                                    'host': _x.get('ws-opts', {}).get('headers', {}).get('host', {})
+                            }
+                            if _x['type'] == 'vless':
+                                _param['security'] = _x['tls']
+                                _param['type'] = _x['network']
+                                del _x['type']
+                            _param = {**_param, **_x}
+                            l_node.append(Node(proto=_proto, uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
+                        except Exception as e:
+                            warn(f'{name} decode failed for {url} {e=} {_x=}')
                     case _:
-                        debug(f'未处理的协议 {_x["type"]}')
-            debug(f'got {len(l_node)} record(s) from {url}')
+                        debug(f'{name} 未处理的协议 {_x["type"]}')
+            debug(f'{name} got {len(l_node)} record(s) from {url}')
             return l_node
                 
 
         # 特殊处理
-        if url.startswith('https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/'):
+        if url.startswith('https://mirror.ghproxy.com/https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/sub/'):
 # #            debug(f'特殊处理w1770946466')
             l_new = []
             for _line in r.split('\n'):
                 if _line.startswith('vmess://'):
-                    _up = urlparse(_line)
-                    if _tmp := b64d(_up.netloc):
+# #                    _up = urlparse(_line)
+# #                    if _tmp := b64d(_up.netloc):
+                    if _tmp := b64d(_line[8:]):
                         try:
                             json.loads(_tmp)
                             _newline = _line
                         except Exception as e:  # 只对vmess中base64解码后不是json格式的内容进行修正
 #                            debug(f'json.loads got {e} {_tmp=}')
                             try:
-                                _tls, _uuid, _server, _port = re.split(':|@', _tmp, 3)
-                                _extra = parse_qs(_up.query) if _up.query else {}
-                                _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
-                                _j = {
-                                        'add': _server,
-                                        'port': _port,
-                                        'id': _uuid,
-                                        'aid': _extra.get('alterId', 0),
-                                        'path': _extra.get('path', '/'),
-                                        'host': _extra.get('obfsParam', ''),
-                                        'tls': _tls,
-#                                        'obfs': _extra['obfs'],
-                                        }
-                                _newline = 'vmess://' + b64encode(json.dumps(_j).encode()).decode()
+                                _up = urlparse(_line)
+                                if _tmp := b64d(_up.netloc):
+                                    _tls, _uuid, _server, _port = re.split(':|@', _tmp, 3)
+                                    _extra = parse_qs(_up.query) if _up.query else {}
+                                    _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
+                                    _j = {
+                                            'add': _server,
+                                            'port': _port,
+                                            'id': _uuid,
+                                            'aid': _extra.get('alterId', 0),
+                                            'path': _extra.get('path', '/'),
+                                            'host': _extra.get('obfsParam', ''),
+                                            'tls': _tls,
+    #                                        'obfs': _extra['obfs'],
+                                            }
+                                    _newline = 'vmess://' + b64encode(json.dumps(_j).encode()).decode()
+    # #                            except ValueError:
+    # #                                continue
                             except Exception as e:
-                                warn(f'parse failed {e} for {_tmp=}')
+                                warn(f'{name} parse failed {e}, {_line=}, {url=}')
                                 continue
                     else:
                         continue
@@ -1121,9 +1218,9 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             r = b64encode('\n'.join(l_new).encode()).decode()
 
         # 特殊处理
-        if url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml' or \
-           url == 'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_trojan.yml' or \
-           url == 'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml' or \
+        if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Rokate/Proxy-Sub/main/clash/clash_trojan.yml' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/freenodes/freenodes/main/clash.yaml' or \
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zhangkaiitugithub/passcro/main/speednodes.yaml' or \
            url == 'https://anaer.github.io/Sub/clash.yaml':
             full_content = yaml.load(r, yaml.FullLoader)
@@ -1152,14 +1249,14 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     _param = {**_param, **_x}
                     l_node.append(Node(proto=_x['type'], uuid=_x.get('uuid', ''), ip=_x['server'], port=int(_x['port']), param=_param, alias=_x['name'], source=url))
                 except Exception as e:
-                    warn(f'decode failed for {url} {e=} {_x=}')
+                    warn(f'{name} decode failed for {url} {e=} {_x=}')
                     continue
-            debug(f'got {len(l_node)} record(s) from {url}')
+            debug(f'{name} got {len(l_node)} record(s) from {url}')
             return l_node
 
 
         if not (s := b64d(r, url)):
-            error(f'decode failed {url} for {r[:100]}')
+            error(f'{name} decode failed {url} for {r[:100]}')
             return []
         ls = s.split('\n')
 
@@ -1167,8 +1264,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             l_tmp = (x for x in ls if x)
 
             # 特殊处理
-            if url == 'https://raw.fastgit.org/learnhard-cn/free_proxy_ss/main/free':
-                debug(f'特殊处理 {url=}')
+            if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/learnhard-cn/free_proxy_ss/main/free':
+# #                debug(f'特殊处理 {url=}')
                 _l_n = []
                 for _x in l_tmp:
                      try:
@@ -1181,12 +1278,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             _new = _x
                         _l_n.append(_new)
                      except Exception as e:
-                        error(f'skip node from {url} {e=} {_x=}')
+                        error(f'{name} skip node from {url} {e=} {_x=}')
                         continue
                 l_tmp = _l_n
 
             # 特殊处理
-            if url == 'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/ss':
+            if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Leon406/SubCrawler/master/sub/share/ss':
                 l_new = []
 #                debug(f'try to process special format node, {url=}')
                 for _x in l_tmp:
@@ -1196,14 +1293,14 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         _p1, _p2 = _t.split('@', 1)
                         x = _x[:5] + b64encode(_p1.encode()).decode() + '@' + _p2 + _x[_idx :]
                     except Exception as e:
-                         warn(f'got {e} processing ss node in {url}')
+                         warn(f'{name} got {e} processing ss node in {url}')
                          continue
                     l_new.append(x)
                 l_tmp = l_new
                 #debug(f'now {l_tmp=}')
 
             # 特殊处理
-            if url == 'https://raw.fastgit.org/eycorsican/rule-sets/master/kitsunebi_sub':
+            if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/eycorsican/rule-sets/master/kitsunebi_sub':
                 l_new = []
 #                debug(f'try to process special format node, {url=}')
                 for _x in l_tmp:
@@ -1224,16 +1321,16 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                                   }
                             _x = _x[:8] + b64encode(json.dumps(_d).encode()).decode()
                         except Exception as e:
-                            warn(f'parse vmess data from {url=} got {e}')
+                            warn(f'{name} parse vmess data from {url=} got {e}')
                             continue
                     l_new.append(_x)
                 l_tmp = l_new
 
 
             # 特殊处理
-            if url == 'https://raw.fastgit.org/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg':
+            if url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg':
                 l_new = []
-                debug(f'try to process special format node, {url=}')
+                debug(f'{name} try to process special format node, {url=}')
                 for _x in l_tmp:
                     if _x.startswith('vless://'):
                         _idx = _x.find('?')
@@ -1265,7 +1362,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                                   }
                             _x = _x[:8] + b64encode(json.dumps(_d).encode()).decode()
                         except Exception as e:
-                            warn(f'parse vmess got {e}, {url=} {_x[8:_idx]}')
+                            warn(f'{name} parse vmess got {e}, {url=} {_x[8:_idx]}')
                             continue
                     l_new.append(_x)
                 l_tmp = l_new
@@ -1283,15 +1380,15 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             else:  # 尝试加=解码
                 l_tmp = (x for x in b64d(r, url).split('\n') if x) if r else []
         except BaseException as e:
-            error(f'got error {e=}')
+            error(f'{name} got error {e=}')
             raise e
         if not isinstance(l_tmp, list):
             l_tmp = list(l_tmp)
 
         if url:
-            debug(f'got {len(l_tmp)} record(s) from {url}')
+            debug(f'{name} got {len(l_tmp)} record(s) from {url}')
         else:
-            debug(f'got {len(l_tmp)} record(s) from data')
+            debug(f'{name} got {len(l_tmp)} record(s) from data')
         return self.__class__._parseProto(l_tmp, url)
 
 
@@ -1321,37 +1418,37 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             f'https://freeclash.org/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%m%d")}.txt',
             f'https://freeclash.org/wp-content/uploads/{today.year}/{today.month:02d}/{today.strftime("%m%d")}.txt',
 
-            'https://raw.fastgit.org/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
 
-            'https://raw.fastgit.org/freefq/free/master/v2',
-            #'https://raw.fastgit.org/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
-# #            'https://raw.fastgit.org/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
-            'https://raw.fastgit.org/ts-sf/fly/main/v2',
-            'https://raw.fastgit.org/ts-sf/fly/main/v2',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/freefq/free/master/v2',
+            #'https://mirror.ghproxy.com/https://raw.githubusercontent.com/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
+# #            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/tbbatbb/Proxy/master/dist/v2ray.config.txt', 
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ts-sf/fly/main/v2',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ts-sf/fly/main/v2',
             ##'https://raw.fgit.ml/ts-sf/fly/main/v2', 
             'https://cdn.jsdelivr.net/gh/ermaozi01/free_clash_vpn/subscribe/v2ray.txt',
 # #            'https://tt.vg/freev2',
             'https://v2ray.neocities.org/v2ray.txt',
-            'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/v2',
-            #'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/ss',
-            'https://raw.fastgit.org/Leon406/SubCrawler/master/sub/share/tr',
-            'https://raw.fastgit.org/peasoft/NoMoreWalls/master/list.txt',
-            #'https://raw.fastgit.org/Lewis-1217/FreeNodes/main/bpjzx1',
-            #'https://raw.fastgit.org/Lewis-1217/FreeNodes/main/bpjzx2',
-            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',
-            'https://raw.fastgit.org/ermaozi01/free_clash_vpn/main/subscribe/v2ray.txt',
-            'https://raw.fastgit.org/ripaojiedian/freenode/main/sub',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Leon406/SubCrawler/master/sub/share/v2',
+            #'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Leon406/SubCrawler/master/sub/share/ss',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Leon406/SubCrawler/master/sub/share/tr',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt',
+            #'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Lewis-1217/FreeNodes/main/bpjzx1',
+            #'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Lewis-1217/FreeNodes/main/bpjzx2',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/a2470982985/getNode/main/v2ray.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ermaozi01/free_clash_vpn/main/subscribe/v2ray.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ripaojiedian/freenode/main/sub',
 
             #'https://gh-proxy.com//raw.fastgit.org/yaney01/Yaney01/main/yaney_01',
-            #'https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt',
-            'https://raw.fastgit.org/learnhard-cn/free_proxy_ss/main/free',
-            'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml',
-            'https://raw.fastgit.org/Rokate/Proxy-Sub/main/clash/clash_trojan.yml',
-            'https://raw.fastgit.org/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',
-            'https://raw.fastgit.org/ZywChannel/free/main/sub',
-            'https://raw.fastgit.org/free18/v2ray/main/v2ray.txt',
+            #'https://mirror.ghproxy.com/https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/learnhard-cn/free_proxy_ss/main/free',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Rokate/Proxy-Sub/main/clash/clash_v2ray.yml',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Rokate/Proxy-Sub/main/clash/clash_trojan.yml',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Jsnzkpg/Jsnzkpg/Jsnzkpg/Jsnzkpg',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ZywChannel/free/main/sub',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/free18/v2ray/main/v2ray.txt',
             #'https://sub.nicevpn.top/Clash.yaml',
-            'https://raw.fastgit.org/mfuu/v2ray/master/v2ray',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray',
 
            f'https://onenode.cc/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%Y%m%d")}.txt',
            f'https://onenode.cc/wp-content/uploads/{today.year}/{today.month:02d}/{today.strftime("%Y%m%d")}.txt',
@@ -1361,18 +1458,18 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             # https://github.com/Helpsoftware/fanqiang
             'https://jiang.netlify.com/',
             'https://youlianboshi.netlify.app/',
-            'https://raw.fastgit.org/eycorsican/rule-sets/master/kitsunebi_sub',
-            'https://raw.fastgit.org/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/eycorsican/rule-sets/master/kitsunebi_sub',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/umelabs/node.umelabs.dev/master/Subscribe/v2ray.md',
 
-            'https://raw.fastgit.org/w1770946466/Auto_proxy/main/Long_term_subscription_num',
-            'https://raw.fastgit.org/mahdibland/ShadowsocksAggregator/master/Eternity',
-            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{beforeyesterday.strftime("%y%m")}/{beforeyesterday.strftime("%y%m%d")}.txt',
-            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
-            f'https://raw.fastgit.org/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/Long_term_subscription_num',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity',
+            f'https://mirror.ghproxy.com/https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/sub/{beforeyesterday.strftime("%y%m")}/{beforeyesterday.strftime("%y%m%d")}.txt',
+            f'https://mirror.ghproxy.com/https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/sub/{yesterday.strftime("%y%m")}/{yesterday.strftime("%y%m%d")}.txt',
+            f'https://mirror.ghproxy.com/https://raw.githubusercontent.com/w1770946466/Auto_proxy/main/sub/{today.strftime("%y%m")}/{today.strftime("%y%m%d")}.txt',
             'https://mareep.netlify.app/sub/merged_proxies_new.yaml',  # https://github.com/vveg26/chromego_merge
-            'https://raw.fastgit.org/a2470982985/getNode/main/v2ray.txt',  # https://github.com/Flik6/getNode
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/a2470982985/getNode/main/v2ray.txt',  # https://github.com/Flik6/getNode
 
-            'https://raw.fastgit.org/freenodes/freenodes/main/clash.yaml',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/freenodes/freenodes/main/clash.yaml',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
@@ -1382,10 +1479,10 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zhangkaiitugithub/passcro/main/speednodes.yaml',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/yebekhe/V2Hub/main/merged_base64',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt',
-            'https://raw.githubusercontent.com/sashalsk/V2Ray/main/V2Config',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/sashalsk/V2Ray/main/V2Config',
         ]
-        #l_source = ['https://raw.fastgit.org/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
-        l_source = l_source[:5]+ l_source[-5:]  # debug only
+        #l_source = ['https://mirror.ghproxy.com/https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
+        #l_source = l_source[:5]+ l_source[-5:]  # debug only
 
         return l_source
 
@@ -1400,10 +1497,10 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 # #                info(f'{name} got event_exit, break')
                 break
             url = t_q.result()
-            debug(f'{name} get task {url=}')
+# #            debug(f'{name} get task {url=}')
             nr += 1
             q_in.task_done()
-            l_node = await self._parseNodeData(url)
+            l_node = await self._parseNodeData(name, url)
             for _node in l_node:
                 await q_out.put(_node)
 
@@ -1461,15 +1558,21 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             try:
                 ipaddress.IPv4Address(node.ip)
             except:
-                # 是host
                 try:
-                    rslt = await rs.resolve_name(node.ip, socket.AF_INET, lifetime=5)
-                except Exception as e:
-                    pass
-# #                    debug(f'{name} got error {e}')
-                else:
-                    node.real_ip = next(rslt.addresses())
-            else:  # 是有效ip
+                    ipaddress.IPv6Address(node.ip)
+                except:
+                    # 是host
+                    try:
+                        rslt = await rs.resolve_name(node.ip, socket.AF_INET, lifetime=5)  # dns查询
+                    except Exception as e:
+                        pass
+    # #                    debug(f'{name} got error {e}')
+                    else:
+                        node.real_ip = next(rslt.addresses())
+                else:  # 是有效v6 ip
+                    node.v4 = False
+                    node.real_ip = node.ip
+            else:  # 是有效v4 ip
                 node.real_ip = node.ip
             if node.real_ip:
                 await q_out.put(node)
@@ -1494,8 +1597,11 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             nr += 1
             q_in.task_done()
 
-            if node.real_ip and f.isPreferredArea(node.real_ip):
-                await q_out.put(node)
+            if node.real_ip:
+                if (not node.v4) or (node.v4 and f.isPreferredArea(node.real_ip)): 
+                    await q_out.put(node)
+                else:
+                    nr_filter += 1
             else:
                 nr_filter += 1
 
@@ -1538,7 +1644,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         return nr, nr_filter
 
     async def measure_node(self, name: str, port: int, e_exit: asyncio.Event, q_in: asyncio.Queue, q_out: asyncio.PriorityQueue, e_increase: asyncio.Event):
-        at = ProxyTest(port_range=port_range, nr_try=1, min_resp_count=1, interval=3, timeout=5)
+        at = ProxyTest(port_range=port_range, nr_try=2, min_resp_count=2, interval=3, timeout=5)
         client = httpx.AsyncClient(headers=headers, verify=False, timeout=at.o_timeout, limits=at.o_limits, proxies=f'http://127.0.0.1:{port}')
         nr, nr_filter = 0, 0
         t_exit = asyncio.create_task(e_exit.wait())
@@ -1675,9 +1781,13 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     nr += 1
                     await q_node.put(None)  # 告诉排重清除历史数据
                     if test_mode:
-                        l_source = [
-                                'https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt',
-                                ]
+                        l_source = []
+                        l_s = ['vless://cd7db63e-4904-453b-8f93-bf56d1fd53e5@[::ffff:6811:e94f]:443?security=tls&sni=vm.webobin.site&type=grpc&serviceName=%40%6ee%74work%6e%69m&fp=chrome#4Sarina-11216',
+                               ]
+                        l_node = self.__class__._parseProto(l_s, 'test')
+                        for _node in l_node:
+                            debug(f'in test_mode, put _node {_node}')
+                            await q_node.put(_node)
                     else:
                         l_source = await self._getNodeUrl()
                         freevpnx = asyncio.create_task(self._tmp_freevpnx(q_node))
@@ -1693,8 +1803,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 else:
                     debug(f'{name} in processing')
             else:
-                pass
-# #                debug(f'{name} remain {nr_remain} candidate')
+                debug(f'{name} remain {nr_remain} candidate, do nothing')
 
             t_increase, t_decrease, t_timeout = asyncio.create_task(e_increase.wait()), asyncio.create_task(e_decrease.wait()), asyncio.create_task(asyncio.sleep(600 if recent_put else 60))
             done, _ = await asyncio.wait({t_exit, t_increase, t_decrease, t_timeout}, return_when=asyncio.FIRST_COMPLETED)
@@ -1707,7 +1816,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 e_increase.clear()
                 nr_remain = q_tested_node.qsize()
                 if nr_remain >= 10:
-                    warn(f'{nr_remain=}, remove tasks in q_url/q_node/q_conn_node')
+                    debug(f'{nr_remain=}, remove tasks in q_url/node/uniq_node/ip_node/area_node/conn_node')
                     # 终止查找
                     while 1:
                         try:
@@ -1723,6 +1832,27 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             break
                         else:
                             q_node.task_done()
+                    while 1:
+                        try:
+                            q_uniq_node.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        else:
+                            q_uniq_node.task_done()
+                    while 1:
+                        try:
+                            q_ip_node.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        else:
+                            q_ip_node.task_done()
+                    while 1:
+                        try:
+                            q_area_node.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        else:
+                            q_area_node.task_done()
                     while 1:
                         try:
                             q_conn_node.get_nowait()
@@ -1754,7 +1884,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         l_host2ip = [asyncio.create_task(self.host2ip(f'host2ip-{i:02d}', event_exit, q_uniq_node, q_ip_node)) for i in range(1, 20 + 1)]
         l_ip2area = [asyncio.create_task(self.ip2area(f'ip2area-{i:02d}', event_exit, q_ip_node, q_area_node)) for i in range(1, 2 + 1)]
         l_filter_bad_ip = [asyncio.create_task(self.filter_bad_ip(f'badip-{i:02d}', event_exit, q_area_node, q_conn_node)) for i in range(1, 20 + 1)]
-        l_measure_node = [asyncio.create_task(self.measure_node(f'measure-{i:02d}', port, event_exit, q_conn_node, q_tested_node, event_candidate_increase)) for i, port in enumerate(port_range, 1)]
+        l_measure_node = [asyncio.create_task(self.measure_node(f'measure-{i:02d}', port, event_exit, q_conn_node, q_tested_node, event_candidate_increase), name=f'measure-{i:02d}') for i, port in enumerate(port_range, 1)]
         launch = asyncio.create_task(self.launch(f'launcher', event_exit, q_tested_node, test_mode, event_candidate_decrease))
         dispatch = asyncio.create_task(self.dispatch(f'dispatch', event_exit, q_url, q_node, q_uniq_node, q_ip_node, q_area_node, q_conn_node, q_tested_node, event_candidate_increase, event_candidate_decrease, test_mode))
         done, _ = await asyncio.wait(l_url2node)
