@@ -46,7 +46,8 @@
 # 20240201 程序结构大改, 并改名为get_proxy, 原来的make_proxy暂时保留。以前是依次执行获取节点、排重、从host取ip，根据地区过滤、socket连接简单过滤、实际连接测试，最后找出所有可用节点，并输出统计信息，然后选择一个节点启用，随着节点数增加，目前至少要等近十分钟才能执行完毕有节点可用，并且备选节点用光后需要重新处理，又要等待近10分钟才能用上。现在改为各步骤并行处理，找到第一个可用节点后马上启用，一般半分钟到一分钟就有节点可用，并且备用节点快用光时就重新获取可用节点，期间不影响当前节点使用且再无需等待新可用节点。代价是无法做统计。
 # 20240218 添加节点；完善支持测试模式；可用节点达到10个则清空任务队列避免获取过多节点
 # 20240220 过滤慢速节点，检查时间后面输出ping值
-# 20240226 增加ipv6地址的判断和支持，v6的ip不参与按地区过滤，改进日志，增强vless支持
+# 20240226 增加ipv6地址的判断和支持，v6的ip不参与按地区过滤，改进日志，增强vless支持, 命令行参数支持指定日志输出级别
+# 20240227 改进日志, 增加节点, 最后一次节点访问重试时尝试通过http代理进行
 
 
 import binascii
@@ -64,8 +65,8 @@ import aiohttp
 # https://github.com/aio-libs/aiohttp/discussions/6044
 # #from aiohttp_socks import ProxyType, ProxyConnector
 import asyncio
-# 貌似还是有警告
-#setattr(asyncio.sslproto._SSLProtocolTransport, "_start_tls_compatible", True)
+# 使用uvloop的话，通过http代理访问https网址时还是有警告
+setattr(asyncio.sslproto._SSLProtocolTransport, "_start_tls_compatible", True)
 import uvloop
 import sys
 import io
@@ -102,17 +103,6 @@ from functools import partial
 from logging import INFO, DEBUG
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt, wait_random, retry_if_result, before_sleep_log, retry_if_exception_type, TryAgain
 from loguru import logger
-logger.remove()
-#logger.add(sys.stderr, backtrace=True, diagnose=True, colorize=True, format='<green>{time:YYYYMMDD_HHmmss}</green><cyan>{level:.1s}</cyan>|<level>{message}</level>', filter='', level='DEBUG')
-logger.add(sys.stderr, colorize=True, format='<green>{time:YYYYMMDD_HHmmss}</green><cyan>{level:.1s}</cyan>:{module}.{function}:{line}|<level>{message}</level>', filter='', level='DEBUG')
-mylogger = logger.opt(colors=True)
-mylogger.level('INFO', color='<white>')
-mylogger.level('DEBUG', color='<blue>')
-#mylogger.level('WARNING', color='<cyan><BLUE>')
-mylogger.level('WARNING', color='<yellow>')
-#mylogger.level('ERROR', color='<red><WHITE>')
-mylogger.level('ERROR', color='<RED><white>')
-info, debug, error, warn, exception = mylogger.info, mylogger.debug, mylogger.error, mylogger.warning, mylogger.exception
 #-#from make_proxy_conf import port_range
 #-#from make_proxy_conf import proxies, headers, conf_tpl
 #-#from make_proxy_conf import proxy_host, proxy_port, proxy_user, proxy_pass
@@ -132,6 +122,8 @@ from get_proxy_conf import qqwry_path
 pp = pprint.PrettyPrinter(indent=2, width=80, compact=True, sort_dicts=False)
 event_exit = asyncio.Event()
 CTRL_C_TIME: float = 0  # 记录最近一次按Ctrl+C的时间
+
+mylogger, succ, info, debug, error, warn, exception = None, None, None, None, None, None, None
 
 
 @dataclass
@@ -219,18 +211,18 @@ def b64d(s: str|bytes, url: str='', show: bool=True) -> str|None:
     if rslt is None:
         if show:
             if len(s) >= 500:
-                debug(f'64decode failed {url=} s[:100]={s[:100]}')
+                debug(f'64decode failed s[:100]={s[:100]} {url=}')
             else:
-                debug(f'64decode failed {url=} {s=}')
+                debug(f'64decode failed {s=} {url=}')
     else:
         if isinstance(rslt, bytes):
             try:
                 rslt = rslt.decode()
             except UnicodeDecodeError as e:
                 if len(rslt) > 500:
-                    debug(f'decode bytes failed {url=} {e=} rslt[:100]={rslt[:100]}')
+                    debug(f'decode bytes failed {e=} rslt[:100]={rslt[:100]}, {url=}')
                 else:
-                    debug(f'decode bytes failed {url=} {e=} {rslt=}')
+                    debug(f'decode bytes failed {e=} {rslt=} {url=}')
                 rslt = None
     return rslt
 
@@ -564,7 +556,7 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
                 if nr_succ >= self.nr_min_succ:  # 达到阈值提前退出
                     break
             except Exception as e:
-                warn(f'{node} {i+1}/{self.nr_try} test failed: {type(e)} {e}')
+                debug(f'{node} {i+1}/{self.nr_try} test failed: {type(e)} {e}')
                 if self.nr_try - i - 1 + nr_succ < self.nr_min_succ:
                     break
             await asyncio.sleep(self.interval)
@@ -750,13 +742,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         try:
             async for attempt in AsyncRetrying(stop=stop_after_attempt(max_retry + 1), wait=wait_random(min=1, max=6), before_sleep=partial(self._my_before_sleep, url, max_retry)):
                 with attempt:
-#                    if attempt.retry_state.attempt_number >= 2:
-#                        debug(f'getting {attempt.retry_state.attempt_number} {url}')
-#                        debug(f'using proxy ...')
-#                        r = await self.client.get(url, timeout=10, proxy=proxies['http://'], ssl=False)
-#                    else:
-#                        r = await self.client.get(url, timeout=10, ssl=False)
-                    r = await self.client.get(url, timeout=10, ssl=True)
+                    if attempt.retry_state.attempt_number == max_retry + 1:
+                        proxy_auth = aiohttp.BasicAuth(proxy_user, proxy_pass)
+                        debug(f'getting {url} using proxy {attempt.retry_state.attempt_number}/{max_retry}...')
+                        r = await self.client.get(url, timeout=10, proxy=proxies['http://'], proxy_auth=proxy_auth, ssl=False)
+                    else:
+                        r = await self.client.get(url, timeout=10, ssl=True)
                     async with r:
                         if r.status == 200:
                             content = await r.text()
@@ -821,7 +812,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         _ip = m.netloc[_idx2 + 1 : _idx1]
                         if _ip.find('[') != -1 and _ip.find(']') != -1:
                             _ip = _ip[1:-1]
-                            debug(f'got ipv6 address: {_node} from {url=}')
+                            debug(f'got ipv6 {_ip}, {_node} from {url=}')
                         _uuid = _tmp.decode() if type(_tmp) is bytes else _tmp
                         _extra = parse_qs(m.query) if m.query else {}
                         _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
@@ -854,7 +845,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             _uuid = b64d(_tmp, url)
                             _uuid = _uuid.decode() if type(_uuid) is bytes else _uuid
                             if not _uuid:
-                                debug(f'_uuid no need decode, {_node=} {url=}')
+# #                                debug(f'_uuid no need decode, {_node=} {url=}')
                                 _uuid = _tmp.decode() if type(_tmp) is bytes else _tmp
     #                            _uuid = _tmp
                             elif type(_uuid) is bytes:
@@ -1092,7 +1083,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt' or \
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt' or \
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt' or \
-           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/sashalsk/V2Ray/main/V2Config':
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vmess.txt' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt':
             r = b64encode(r.encode())
 
         # 特殊处理
@@ -1412,8 +1404,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             f'https://clashgithub.com/wp-content/uploads/rss/{today.strftime("%Y%m%d")}.txt',
 #            f'https://nodefree.org/dy/{beforeyesterday.year}/{beforeyesterday.month:02d}/{beforeyesterday.strftime("%Y%m%d")}.txt',
 
-            f'https://oneclash.cc/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%Y%m%d")}.txt',
-            f'https://oneclash.cc/wp-content/uploads/{today.year}/{today.month:02d}/{today.strftime("%Y%m%d")}.txt',
+            f'https://node.oneclash.cc/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%Y%m%d")}.txt',
+            f'https://node.oneclash.cc/{today.year}/{today.month:02d}/{today.strftime("%Y%m%d")}.txt',
 
             f'https://freeclash.org/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%m%d")}.txt',
             f'https://freeclash.org/wp-content/uploads/{today.year}/{today.month:02d}/{today.strftime("%m%d")}.txt',
@@ -1450,8 +1442,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             #'https://sub.nicevpn.top/Clash.yaml',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray',
 
-           f'https://onenode.cc/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%Y%m%d")}.txt',
-           f'https://onenode.cc/wp-content/uploads/{today.year}/{today.month:02d}/{today.strftime("%Y%m%d")}.txt',
+           f'https://node.onenode.cc/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%Y%m%d")}.txt',
+           f'https://node.onenode.cc/{today.year}/{today.month:02d}/{today.strftime("%Y%m%d")}.txt',
 
             'https://anaer.github.io/Sub/clash.yaml',
 
@@ -1473,13 +1465,16 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/yudou66.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/blues.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt',
-            'https://telegeam.github.io/blog1/a/2024/1/20240110.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mheidari98/.proxy/main/all',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zhangkaiitugithub/passcro/main/speednodes.yaml',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/yebekhe/V2Hub/main/merged_base64',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt',
-            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/sashalsk/V2Ray/main/V2Config',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vmess.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vless.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/ss.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt',
         ]
         #l_source = ['https://mirror.ghproxy.com/https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
         #l_source = l_source[:5]+ l_source[-5:]  # debug only
@@ -1703,14 +1698,14 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
             if sys.platform != 'win32' and not test_mode:
                 p, filepath = await self.launch_proxy(node)
-                info(f'{name} service started, pid={p.pid}')
+                succ(f'{name} service started, pid={p.pid}')
                 at = ProxyTest(nr_try=2, min_resp_count=1, interval=8, timeout=7)
                 while 1:
                     #debug(f'{name} check node avaliable ...')
                     ping, nr_succ = await at._http_connect(node, proxy_auth=proxy_auth)
                     #debug(f'{name} check avaliable got {ping=} {nr_succ=}')
                     if ping >= 9999999 or nr_succ < at.nr_min_succ:
-                        info(f'{name} node invaliable, choose new one')
+                        info(f'{name} node invaliable, picking new one')
                         break
                     else:
                         #info(f'{name} wait for next check ...')
@@ -1775,19 +1770,27 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         while 1:
             recent_put = False
             nr_remain = q_tested_node.qsize()
-            if nr_remain <= 1 and (time_add is None or time() - time_add >=60):
+            if nr_remain <= 1 and (time_add is None or time() - time_add >=90):
                 if all((q.qsize() == 0 for q in (q_url, q_node, q_uniq_node, q_ip_node, q_area_node, q_conn_node))):
                     info(f'{name} few candidate({nr_remain}), get more...')
                     nr += 1
                     await q_node.put(None)  # 告诉排重清除历史数据
                     if test_mode:
-                        l_source = []
+                        l_source = [
+# #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vmess.txt',
+# #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/ss.txt',
+# #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt',
+# #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vless.txt',
+                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt',
+                                    ]
                         l_s = ['vless://cd7db63e-4904-453b-8f93-bf56d1fd53e5@[::ffff:6811:e94f]:443?security=tls&sni=vm.webobin.site&type=grpc&serviceName=%40%6ee%74work%6e%69m&fp=chrome#4Sarina-11216',
                                ]
-                        l_node = self.__class__._parseProto(l_s, 'test')
-                        for _node in l_node:
-                            debug(f'in test_mode, put _node {_node}')
-                            await q_node.put(_node)
+                        l_s = []
+                        if l_s:
+                            l_node = self.__class__._parseProto(l_s, 'test')
+                            for _node in l_node:
+                                debug(f'in test_mode, put _node {_node}')
+                                await q_node.put(_node)
                     else:
                         l_source = await self._getNodeUrl()
                         freevpnx = asyncio.create_task(self._tmp_freevpnx(q_node))
@@ -1803,7 +1806,10 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 else:
                     debug(f'{name} in processing')
             else:
-                debug(f'{name} remain {nr_remain} candidate, do nothing')
+                if nr_remain > 1:
+                    debug(f'{name} remain {nr_remain} candidate, do nothing')
+                else:
+                    debug(f'{name} remain {nr_remain} candidate, frequently check, do nothing')
 
             t_increase, t_decrease, t_timeout = asyncio.create_task(e_increase.wait()), asyncio.create_task(e_decrease.wait()), asyncio.create_task(asyncio.sleep(600 if recent_put else 60))
             done, _ = await asyncio.wait({t_exit, t_increase, t_decrease, t_timeout}, return_when=asyncio.FIRST_COMPLETED)
@@ -1864,7 +1870,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     debug(f'now {nr_remain=}')
             else:
                 e_decrease.clear()
-                info(f'{name} candidate decreased to {q_tested_node.qsize()}, check')
+                debug(f'{name} candidate decreased to {q_tested_node.qsize()}, check')
                 continue
 
         info(f'{name} exit.')
@@ -1879,14 +1885,14 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.PriorityQueue()
         event_candidate_increase, event_candidate_decrease = asyncio.Event(), asyncio.Event()
 
-        l_url2node = [asyncio.create_task(self.url2node(f'url2node-{i:02d}', event_exit, q_url, q_node)) for i in range(1, 10 + 1)]
-        uniq_nodes = asyncio.create_task(self.uniq_nodes(f'uniq-worker', event_exit, q_node, q_uniq_node))
-        l_host2ip = [asyncio.create_task(self.host2ip(f'host2ip-{i:02d}', event_exit, q_uniq_node, q_ip_node)) for i in range(1, 20 + 1)]
-        l_ip2area = [asyncio.create_task(self.ip2area(f'ip2area-{i:02d}', event_exit, q_ip_node, q_area_node)) for i in range(1, 2 + 1)]
-        l_filter_bad_ip = [asyncio.create_task(self.filter_bad_ip(f'badip-{i:02d}', event_exit, q_area_node, q_conn_node)) for i in range(1, 20 + 1)]
+        l_url2node = [asyncio.create_task(self.url2node(f'url2node-{i:02d}', event_exit, q_url, q_node), name=f'url2node-{i:02d}') for i in range(1, 10 + 1)]
+        uniq_nodes = asyncio.create_task(self.uniq_nodes(f'uniq-worker', event_exit, q_node, q_uniq_node), name='uniq_node')
+        l_host2ip = [asyncio.create_task(self.host2ip(f'host2ip-{i:02d}', event_exit, q_uniq_node, q_ip_node), name=f'host2ip-{i:02d}') for i in range(1, 20 + 1)]
+        l_ip2area = [asyncio.create_task(self.ip2area(f'ip2area-{i:02d}', event_exit, q_ip_node, q_area_node), name=f'ip2area-{i:02d}') for i in range(1, 2 + 1)]
+        l_filter_bad_ip = [asyncio.create_task(self.filter_bad_ip(f'badip-{i:02d}', event_exit, q_area_node, q_conn_node), name=f'badip-{i:02d}') for i in range(1, 20 + 1)]
         l_measure_node = [asyncio.create_task(self.measure_node(f'measure-{i:02d}', port, event_exit, q_conn_node, q_tested_node, event_candidate_increase), name=f'measure-{i:02d}') for i, port in enumerate(port_range, 1)]
-        launch = asyncio.create_task(self.launch(f'launcher', event_exit, q_tested_node, test_mode, event_candidate_decrease))
-        dispatch = asyncio.create_task(self.dispatch(f'dispatch', event_exit, q_url, q_node, q_uniq_node, q_ip_node, q_area_node, q_conn_node, q_tested_node, event_candidate_increase, event_candidate_decrease, test_mode))
+        launch = asyncio.create_task(self.launch(f'launcher', event_exit, q_tested_node, test_mode, event_candidate_decrease), name='launch')
+        dispatch = asyncio.create_task(self.dispatch(f'dispatch', event_exit, q_url, q_node, q_uniq_node, q_ip_node, q_area_node, q_conn_node, q_tested_node, event_candidate_increase, event_candidate_decrease, test_mode), name='dispatch')
         done, _ = await asyncio.wait(l_url2node)
         l = [_done.result() for _done in done]
         s = sum(l)
@@ -1933,7 +1939,22 @@ if __name__ == '__main__':
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     parser = argparse.ArgumentParser(prog='make_proxy.py')
     parser.add_argument('-t', '--test', action='store_true', help='in test mode')
+    parser.add_argument('-l', '--loglevel', choices=['debug', 'info'], default='debug', help='set log level')
     args = parser.parse_args()
+
+    logger.remove()
+#logger.add(sys.stderr, backtrace=True, diagnose=True, colorize=True, format='<green>{time:YYYYMMDD_HHmmss}</green><cyan>{level:.1s}</cyan>|<level>{message}</level>', filter='', level='DEBUG')
+    logger.add(sys.stderr, colorize=True, format='<green>{time:YYYYMMDD_HHmmss}</green><cyan>{level:.1s}</cyan>:{module}.{function}:{line}|<level>{message}</level>', filter='', level='DEBUG' if args.loglevel == 'debug' else 'INFO')
+    mylogger = logger.opt(colors=True)
+    mylogger.level('INFO', color='<white>')
+    mylogger.level('DEBUG', color='<blue>')
+#mylogger.level('WARNING', color='<cyan><BLUE>')
+    mylogger.level('WARNING', color='<yellow>')
+#mylogger.level('ERROR', color='<red><WHITE>')
+    mylogger.level('ERROR', color='<RED><white>')
+    mylogger.level('SUCCESS', color='<GREEN><white>')
+    succ, info, debug, error, warn, exception = mylogger.success, mylogger.info, mylogger.debug, mylogger.error, mylogger.warning, mylogger.exception
+
     asyncio.run(main(args.test), debug=args.test)
 
 
