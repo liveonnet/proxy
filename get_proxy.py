@@ -48,6 +48,7 @@
 # 20240220 过滤慢速节点，检查时间后面输出ping值
 # 20240226 增加ipv6地址的判断和支持，v6的ip不参与按地区过滤，改进日志，增强vless支持, 命令行参数支持指定日志输出级别
 # 20240227 改进日志, 增加节点, 最后一次节点访问重试时尝试通过http代理进行
+# 20240228 Node结构增加保存地区信息用于展示, 改进日志，清理无用代码, 修正Node结构比较大小时未判断score是否为None的bug
 
 
 import binascii
@@ -103,14 +104,6 @@ from functools import partial
 from logging import INFO, DEBUG
 from tenacity import AsyncRetrying, RetryError, stop_after_attempt, wait_random, retry_if_result, before_sleep_log, retry_if_exception_type, TryAgain
 from loguru import logger
-#-#from make_proxy_conf import port_range
-#-#from make_proxy_conf import proxies, headers, conf_tpl
-#-#from make_proxy_conf import proxy_host, proxy_port, proxy_user, proxy_pass
-#-#from make_proxy_conf import test_wait_seconds
-#-#from make_proxy_conf import v2ray_path, hysteria_path, hysteria2_path, conf_basepath
-#-#from make_proxy_conf import inboundsSetting, outboundsSetting_vmess, outboundsSetting_ss, outboundsSetting_trojan, outboundsSetting_vless
-#-#from make_proxy_conf import settingHysteria , settingHysteria2
-#-#from make_proxy_conf import qqwry_path
 from get_proxy_conf import port_range
 from get_proxy_conf import proxies, headers, conf_tpl
 from get_proxy_conf import proxy_host, proxy_port, proxy_user, proxy_pass
@@ -137,19 +130,13 @@ class Node(object):
     port: int = 0
     param: str|list|dict = None  # 包含协议需要的
     alias: str = ''
+    source: str = None  # 标明来源
+    area: str = None  # 根据ip得出的地区
 
     # 用于连通性测试
     real_ip: str = ''  # ip字段为域名时，连通性测试前需要获取对应ip地址. 如果ip=real_ip说明ip是地址，如果real_ip为空说明ip是域名但无法解析出地址，如果real_ip不为空且real_ip!=ip说明ip是域名且能解析出地址
-# #    protocol: str = ''
     score: int|None = None
     score_unit: str = 'ms'
-
-    # 标明来源
-    source: str|list[str] = None  # 开始时都是str，排重后相同的节点其source合并成list[str]
-
-# #    @property
-# #    def is_connected(self):
-# #        return self.score is not None
 
     def __repr__(self):
         if self.proto == 'hysteria2' or self.proto == 'hy':
@@ -161,7 +148,12 @@ class Node(object):
         return hash((str(self), self.uuid, json.dumps(self.param)))
 
     def __lt__(self, other):
-        return self.score < other.score
+        if self.score and other.score:
+            return self.score < other.score
+        elif self.score:
+            return False
+        else:
+            return True
 
     def __le__(self, other):
         return self.score <= other.score
@@ -246,16 +238,19 @@ class Ip2Area(object):
         '''
         return True if self.p.search(self.getArea(ip)) else False
 
-    def isPreferredArea(self, ip: str) -> bool:
+    def isPreferredArea(self, ip: str) -> (bool, str):
         '''是否为优先使用的地区
         '''
-        return True if self.pPreferredArea.match(self.getCountry(ip)) else False
+        if m := self.pPreferredArea.match(self.getCountry(ip)):
+            return (True, m.group(0))
+        else:
+            return (False, None)
 
     def getCountry(self, ip: str) -> str:
         '''将国家地区精简为国家 例如 `美国华盛顿` 精简为 `美国`
         欧盟、台湾也算
         '''
-        if (m := self.pCountry.match(area := self.getArea(ip))):
+        if m := self.pCountry.match(area := self.getArea(ip)):
             return m.group(0)
         return area
 
@@ -541,10 +536,8 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
 
         # https://github.com/encode/httpx/discussions/2350  httpx.URL() does not parse url correctly with curly brackets in password
         p = httpx.Proxy(httpx.URL(f'http://{proxy_host}:{proxy_port}/', username=proxy_user, password=proxy_pass))
-# #        client = httpx.AsyncClient(timeout=self.timeout, proxies=f'http://{quote(proxy_user)}:{quote(proxy_pass)}@{proxy_host}:{proxy_port}')
 
         client = httpx.AsyncClient(headers=headers, verify=False, timeout=self.timeout, proxies=p)
-# #        client = httpx.AsyncClient(timeout=self.timeout, proxies=p)
         for i in range(self.nr_try):
             try:
                 begin = time()
@@ -781,7 +774,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 case 'vmess':  # json(key: <id><add><path><port><host><aid><tls><ps>)
                     tmp = b64d(m.netloc + m.path, url)
                     if not tmp:
-                        debug('vemss base64 parse failed')
+                        debug('vemss base64 parse failed {_node=} {url=}')
                         continue
                     try:
                         _param = json.loads(tmp)
@@ -827,13 +820,9 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 case 'ss':  # base64(<method>:<password>)@<ip>:<port>#<alias>
                     _uuid = None
                     # 先判断是否整体为base64编码
-# #                    try:
-# #                        _s = b64decode(m.netloc.encode(), validate=True).decode()
                     _s = b64d(m.netloc.encode(), url, False)
-                    if not _s:
-# #                    except:  # 非整体base64编码
+                    if not _s:  # 非整体base64编码
                         _tmp, _ip_port = m.netloc.rsplit('@', 1)
-# #                        _tmp = ''.join(_tmp)
                         try:
                             _ip, _port = _ip_port.rsplit(':', 1)
                             if _ip.find('[') != -1 and _ip.find(']') != -1:  # ipv6
@@ -847,7 +836,6 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             if not _uuid:
 # #                                debug(f'_uuid no need decode, {_node=} {url=}')
                                 _uuid = _tmp.decode() if type(_tmp) is bytes else _tmp
-    #                            _uuid = _tmp
                             elif type(_uuid) is bytes:
                                 warn(f'skip one node cause Decode failed: {_uuid=} {_node=} {url=}')
                                 continue
@@ -889,12 +877,10 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         _ip = m.netloc[_idx2 + 1 : _idx1]
                         if _ip.find('[') != -1 and _ip.find(']') != -1:
                             _ip = _ip[1:-1]
-# #                            debug(f'got ipv6 address: {_node} from {url=}')
-                        #_uuid, _ip, _port = re.split(':|@', m.netloc, 2)
+# #                            debug(f'got ipv6 address {_ip=}: {_node}, {url=}')
                         _extra = parse_qs(m.query) if m.query else {}
                         _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
                         _alias = unquote_plus(m.fragment)
-                        #debug(f'vless:{_node}')
                         if 'path' not in _extra:
                             _extra['path'] = '/'
                         if 'security' not in _extra:
@@ -934,7 +920,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         warn(f'got error when add hysteria node: {e} {m=} {url=}')
                 case 'hysteria2' | 'hy2':  # <auth>@<server>:<port>/?insecure=<>&sni=<>#<name>
                     try:
-                        _auth, _server, _port = re.split(':|@', m.netloc, 2)
+                        _auth, _server, _port = re.split(':|@', m.netloc, 2)  # TODO: 支持ipv6
                         _extra = parse_qs(m.query) if m.query else {}
                         _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
                         _extra['insecure'] = True if ('insecure' not in _extra) or (_extra['insecure'] == 1 or _extra['insecure'] == True) else False
@@ -954,7 +940,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 case '':
                     pass
                 case _:
-                    warn(f'unknown {_proto=} source: {url=} {_node=}')
+                    warn(f'unknown {_proto=} {_node=}, {url=}')
 
         return l_node
 
@@ -968,7 +954,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         beforeyesterday = yesterday + timedelta(days=-1)
         for _day in [today, yesterday, beforeyesterday]:
             url = f'https://freenode.me/wp-content/uploads/{_day.year}/{_day.month:02d}/{_day.month:02d}{_day.day:02d}{{}}.txt'
-            l_cor = [self.client.head(url.format(x if x else ''), timeout=3, ssl=False) for x in range(100)]
+            l_cor = [self.client.head(url.format(x if x else ''), timeout=3, ssl=False) for x in range(1)]
             #l_cor.append(self.client.head(f'https://freenode.me/wp-content/uploads/{_day.year}/{_day.month:02d}/{_day.month:02d}{_day.day:02d}.txt', timeout=3, ssl=False))
             l_rslt = await asyncio.gather(*l_cor, return_exceptions=True)
             for r in l_rslt:
@@ -978,6 +964,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         l_url.append(str(r.url))
 
         #debug(f'detected freenode.me url: {l_url}')
+        if not l_url:
+            warn(f'no file detected !!!')
         return l_url
 
     async def _tmpDetectMiBeiFileName(self) -> list[str]:
@@ -1018,6 +1006,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         url = 'https://view.ssfree.ru/'
         l_node = []
         if not (content := await self._getNodeData(url)):
+            warn(f'no node data found from {url}')
             return l_node
         if m := re.search('data-clipboard-text="(.+?)"', content):
             data = m.group(1)
@@ -1046,8 +1035,6 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             if l:
                 l_tmp = list(filter(None, chain.from_iterable((x.split('\n') for x in l))))  # filter用于过滤空行
                 debug(f'got {len(l_tmp)} record(s) from {url}')
-# #                pp = pprint.PrettyPrinter(indent=2, width=80, compact=True, sort_dicts=False)
-# #                debug(pp.pformat(l_tmp))
                 l_node = self.__class__._parseProto(l_tmp, url)
                 for _node in l_node:
                     await q_out.put(_node)
@@ -1059,8 +1046,6 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             if l := re.findall('```(.+?)```', content, re.U|re.M|re.S):
                 l_tmp = list(filter(None, chain.from_iterable((x.split('\n') for x in l))))  # filter用于过滤空行
                 debug(f'got {len(l_tmp)} record(s) from {url}')
-# #                pp = pprint.PrettyPrinter(indent=2, width=80, compact=True, sort_dicts=False)
-# #                debug(pp.pformat(l_tmp))
                 l_node = self.__class__._parseProto(l_tmp, url)
                 for _node in l_node:
                     await q_out.put(_node)
@@ -1162,9 +1147,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             l_new = []
             for _line in r.split('\n'):
                 if _line.startswith('vmess://'):
-# #                    _up = urlparse(_line)
-# #                    if _tmp := b64d(_up.netloc):
-                    if _tmp := b64d(_line[8:]):
+                    if _tmp := b64d(_line[8:], url):
                         try:
                             json.loads(_tmp)
                             _newline = _line
@@ -1172,7 +1155,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 #                            debug(f'json.loads got {e} {_tmp=}')
                             try:
                                 _up = urlparse(_line)
-                                if _tmp := b64d(_up.netloc):
+                                if _tmp := b64d(_up.netloc, url):
                                     _tls, _uuid, _server, _port = re.split(':|@', _tmp, 3)
                                     _extra = parse_qs(_up.query) if _up.query else {}
                                     _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
@@ -1187,8 +1170,6 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
     #                                        'obfs': _extra['obfs'],
                                             }
                                     _newline = 'vmess://' + b64encode(json.dumps(_j).encode()).decode()
-    # #                            except ValueError:
-    # #                                continue
                             except Exception as e:
                                 warn(f'{name} parse failed {e}, {_line=}, {url=}')
                                 continue
@@ -1329,12 +1310,10 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         try:
                             _t = b64decode(_x[8:_idx]).decode()
                             _p1, _p2 = _t.split(':', 1)
-# #                            debug(f'{_t=} {_p1=} {_p2=}')
                         except Exception as e:
                             continue
                         else:
                             _x = _x[:8] + _p2 + _x[_idx :]
-# #                            debug(f'{_x=}')
                     elif _x.startswith('vmess://'):
                         _idx = _x.find('?')
                         try:
@@ -1359,10 +1338,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     l_new.append(_x)
                 l_tmp = l_new
 
-# #                debug(f'now Jsnzkpg got {len(l_tmp)} records')
-# #                debug(f'{l_tmp=}')
         except binascii.Error:
-            if r.startswith('https://api.tsutsu.one/sub'):
+            if r.startswith('https://api.tsutsu.one/sub'):  # TODO: 可能无用，可以删除
                 debug(f'try to parse as param of \'url\'')  # https://api.tsutsu.one/sub?target=mixed&url=xxxxxx
                 up = urlparse(r)
                 debug(f'{r=} {url=} {data=}')
@@ -1370,7 +1347,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 l_url = qs['url'][0]
                 l_tmp = l_url.split('|') or []
             else:  # 尝试加=解码
-                l_tmp = (x for x in b64d(r, url).split('\n') if x) if r else []
+                l_tmp = (x for x in b64d(r, url, False).split('\n') if x) if r else []
         except BaseException as e:
             error(f'{name} got error {e=}')
             raise e
@@ -1593,10 +1570,15 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             q_in.task_done()
 
             if node.real_ip:
-                if (not node.v4) or (node.v4 and f.isPreferredArea(node.real_ip)): 
+                if not node.v4:
                     await q_out.put(node)
                 else:
-                    nr_filter += 1
+                    r, a = f.isPreferredArea(node.real_ip)
+                    if r:
+                        node.area = a
+                        await q_out.put(node)
+                    else:
+                        nr_filter += 1
             else:
                 nr_filter += 1
 
@@ -1604,7 +1586,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 # #        info(f'{name} exit. {nr} processed, {nr_filter} filtered.')
         return nr, nr_filter
 
-    async def filter_bad_ip(self, name: str, e_exit: asyncio.Event, q_in: asyncio.Queue, q_out: asyncio.Queue):
+    async def filter_bad_ip(self, name: str, e_exit: asyncio.Event, q_in: asyncio.Queue, q_out: asyncio.PriorityQueue):
         """简单过滤地址
         用real_ip字段，用socket尝试连接，能连接上的才保留, 用select提速
 
@@ -1627,18 +1609,20 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 nr_filter += 1
                 continue
 
+            x = time()
             try:
-                _, wrt = await asyncio.wait_for(asyncio.open_connection(node.real_ip, int(node.port)), 5.0)
+                _, wrt = await asyncio.wait_for(asyncio.open_connection(node.real_ip, int(node.port), limit=512), 5.0)
             except Exception:
                 nr_filter += 1
             else:
-                await q_out.put(node)
+                await q_out.put((time()-x, node))
                 wrt.close()
+                await wrt.wait_closed()
 
 # #        info(f'{name} exit. {nr} processed, {nr_filter} filtered.')
         return nr, nr_filter
 
-    async def measure_node(self, name: str, port: int, e_exit: asyncio.Event, q_in: asyncio.Queue, q_out: asyncio.PriorityQueue, e_increase: asyncio.Event):
+    async def measure_node(self, name: str, port: int, e_exit: asyncio.Event, q_in: asyncio.PriorityQueue, q_out: asyncio.PriorityQueue, e_increase: asyncio.Event):
         at = ProxyTest(port_range=port_range, nr_try=2, min_resp_count=2, interval=3, timeout=5)
         client = httpx.AsyncClient(headers=headers, verify=False, timeout=at.o_timeout, limits=at.o_limits, proxies=f'http://127.0.0.1:{port}')
         nr, nr_filter = 0, 0
@@ -1651,7 +1635,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 if t_exit in done:
     # #                info(f'{name} got event_exit, break')
                     break
-                node = t_q.result()
+                _, node = t_q.result()
                 nr += 1
                 q_in.task_done()
 
@@ -1660,7 +1644,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     ping = None
                 if ping:
                     if ping < 1000:  # 过滤慢速节点
-                        info(f'{name} conn succ {ping}{at.unit} {node} {node.alias}')
+                        info(f'{name} conn succ {ping}{at.unit} {node.area} {node} {node.alias}')
                         node.score = ping
                         node.score_unit = at.unit
                         await q_out.put((node.score, node))
@@ -1694,7 +1678,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             nr += 1
             e_decrease.set()
             q_in.task_done()
-            info(f'{name} pick {score} {node}, {q_in.qsize()} remain')
+            info(f'{name} pick {score} {node.area} {node}, {q_in.qsize()} remain')
 
             if sys.platform != 'win32' and not test_mode:
                 p, filepath = await self.launch_proxy(node)
@@ -1781,7 +1765,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 # #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/ss.txt',
 # #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt',
 # #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vless.txt',
-                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt',
+# #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt',
+                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/shirkerboy/scp/main/sub',
                                     ]
                         l_s = ['vless://cd7db63e-4904-453b-8f93-bf56d1fd53e5@[::ffff:6811:e94f]:443?security=tls&sni=vm.webobin.site&type=grpc&serviceName=%40%6ee%74work%6e%69m&fp=chrome#4Sarina-11216',
                                ]
@@ -1882,14 +1867,14 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         else:
             info(f'{"-"*10} IN PROD MODE {"-"*10}')
         q_url, q_node, q_uniq_node, q_ip_node, q_area_node, q_conn_node, q_tested_node = \
-                asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.PriorityQueue()
+                asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.Queue(), asyncio.PriorityQueue(), asyncio.PriorityQueue()
         event_candidate_increase, event_candidate_decrease = asyncio.Event(), asyncio.Event()
 
         l_url2node = [asyncio.create_task(self.url2node(f'url2node-{i:02d}', event_exit, q_url, q_node), name=f'url2node-{i:02d}') for i in range(1, 10 + 1)]
         uniq_nodes = asyncio.create_task(self.uniq_nodes(f'uniq-worker', event_exit, q_node, q_uniq_node), name='uniq_node')
-        l_host2ip = [asyncio.create_task(self.host2ip(f'host2ip-{i:02d}', event_exit, q_uniq_node, q_ip_node), name=f'host2ip-{i:02d}') for i in range(1, 20 + 1)]
+        l_host2ip = [asyncio.create_task(self.host2ip(f'host2ip-{i:02d}', event_exit, q_uniq_node, q_ip_node), name=f'host2ip-{i:02d}') for i in range(1, 30 + 1)]
         l_ip2area = [asyncio.create_task(self.ip2area(f'ip2area-{i:02d}', event_exit, q_ip_node, q_area_node), name=f'ip2area-{i:02d}') for i in range(1, 2 + 1)]
-        l_filter_bad_ip = [asyncio.create_task(self.filter_bad_ip(f'badip-{i:02d}', event_exit, q_area_node, q_conn_node), name=f'badip-{i:02d}') for i in range(1, 20 + 1)]
+        l_filter_bad_ip = [asyncio.create_task(self.filter_bad_ip(f'badip-{i:02d}', event_exit, q_area_node, q_conn_node), name=f'badip-{i:02d}') for i in range(1, 30 + 1)]
         l_measure_node = [asyncio.create_task(self.measure_node(f'measure-{i:02d}', port, event_exit, q_conn_node, q_tested_node, event_candidate_increase), name=f'measure-{i:02d}') for i, port in enumerate(port_range, 1)]
         launch = asyncio.create_task(self.launch(f'launcher', event_exit, q_tested_node, test_mode, event_candidate_decrease), name='launch')
         dispatch = asyncio.create_task(self.dispatch(f'dispatch', event_exit, q_url, q_node, q_uniq_node, q_ip_node, q_area_node, q_conn_node, q_tested_node, event_candidate_increase, event_candidate_decrease, test_mode), name='dispatch')
@@ -1942,15 +1927,13 @@ if __name__ == '__main__':
     parser.add_argument('-l', '--loglevel', choices=['debug', 'info'], default='debug', help='set log level')
     args = parser.parse_args()
 
+    # 初始化日志
     logger.remove()
-#logger.add(sys.stderr, backtrace=True, diagnose=True, colorize=True, format='<green>{time:YYYYMMDD_HHmmss}</green><cyan>{level:.1s}</cyan>|<level>{message}</level>', filter='', level='DEBUG')
     logger.add(sys.stderr, colorize=True, format='<green>{time:YYYYMMDD_HHmmss}</green><cyan>{level:.1s}</cyan>:{module}.{function}:{line}|<level>{message}</level>', filter='', level='DEBUG' if args.loglevel == 'debug' else 'INFO')
     mylogger = logger.opt(colors=True)
     mylogger.level('INFO', color='<white>')
     mylogger.level('DEBUG', color='<blue>')
-#mylogger.level('WARNING', color='<cyan><BLUE>')
     mylogger.level('WARNING', color='<yellow>')
-#mylogger.level('ERROR', color='<red><WHITE>')
     mylogger.level('ERROR', color='<RED><white>')
     mylogger.level('SUCCESS', color='<GREEN><white>')
     succ, info, debug, error, warn, exception = mylogger.success, mylogger.info, mylogger.debug, mylogger.error, mylogger.warning, mylogger.exception
