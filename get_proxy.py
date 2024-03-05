@@ -49,6 +49,9 @@
 # 20240226 增加ipv6地址的判断和支持，v6的ip不参与按地区过滤，改进日志，增强vless支持, 命令行参数支持指定日志输出级别
 # 20240227 改进日志, 增加节点, 最后一次节点访问重试时尝试通过http代理进行
 # 20240228 Node结构增加保存地区信息用于展示, 改进日志，清理无用代码, 修正Node结构比较大小时未判断score是否为None的bug
+# 20240229 增加节点, 改进测试模式下的日志输出
+# 20240301 调整日志，改进vless生成配置的逻辑, 改进代码, 缩短测试当前节点的时间间隔
+# 20240305 改进vless配置, uniq_node以天为间隔做节点排重，launcher改变test_mode参数名为measure_mode, 代理日志输出到/dev/shm目录
 
 
 import binascii
@@ -73,8 +76,7 @@ import sys
 import io
 import os
 import os.path
-import random
-from random import sample
+from random import choice, sample, shuffle
 import shlex
 import subprocess
 from subprocess import TimeoutExpired
@@ -116,8 +118,7 @@ pp = pprint.PrettyPrinter(indent=2, width=80, compact=True, sort_dicts=False)
 event_exit = asyncio.Event()
 CTRL_C_TIME: float = 0  # 记录最近一次按Ctrl+C的时间
 
-mylogger, succ, info, debug, error, warn, exception = None, None, None, None, None, None, None
-
+mylogger, trace, debug, info, succ, warn, error, critical = None, None, None, None, None, None, None, None
 
 @dataclass
 class Node(object):
@@ -303,33 +304,33 @@ class LaunchProxyMix(object):
     def __init__(self):
         super().__init__()
 
-    async def launch_proxy(self, node: Node, test_mode: bool = False, port: int = 0) -> tuple[asyncio.subprocess.Process, str]:
-        '''`test_mode` 为True时尝试通过命令行传入配置
+    async def launch_proxy(self, node: Node, measure_mode: bool = False, port: int = 0) -> tuple[asyncio.subprocess.Process, str]:
+        '''`measure_mode` 为True时尝试通过命令行传入配置
 
         返回启动的进程和对应的配置文件路径，如果是命令行传入配置，则配置文件路径为空
         '''
         proto = node.proto
         match proto:
             case 'vmess' | 'vless' | 'ss' | 'trojan':
-                return await self._launch_v2ray(node, test_mode, port)
+                return await self._launch_v2ray(node, measure_mode, port)
             case 'hysteria':
-                return await self._launch_hysteria(node, test_mode, port)
+                return await self._launch_hysteria(node, measure_mode, port)
             case 'hysteria2':
-                return await self._launch_hysteria2(node, test_mode, port)
+                return await self._launch_hysteria2(node, measure_mode, port)
             case _:
                 error(f'unknown proto {proto} !!!')
                 return None, ''
 
 
-    async def _launch_v2ray(self, node: Node, test_mode: bool, port: int = 0) -> tuple[asyncio.subprocess.Process, str]:
+    async def _launch_v2ray(self, node: Node, measure_mode: bool, port: int = 0) -> tuple[asyncio.subprocess.Process, str]:
         p, filepath = None, ''
-        if not test_mode:
+        if not measure_mode:
             # kill running one
             os.system("kill `ps xf| grep -v grep | grep v2ray | awk '{print $1}'` > /dev/null 2>&1")
 
         nc = NodeConfig()
         settings = nc.genConfig[node.proto](node)
-        if test_mode == True:
+        if measure_mode:
             settings['inbounds'].pop()  # 删除http2
             settings['inbounds'].pop()  # 删除socks
             settings['inbounds'][0]['listen'] = '127.0.0.1'
@@ -342,6 +343,12 @@ class LaunchProxyMix(object):
                 "rules": [],
                 "balancers": []
             }
+#-#
+#-#            trace(f'{node} --> {pp.pformat(settings["outbounds"])}')
+#-#            filepath_tmp = PurePath('/dev/shm/', f"{node.proto}_{node.ip}_x.json").as_posix()
+#-#            with open(filepath_tmp, 'w') as fo:
+#-#                fo.write(jsonpickle.dumps(settings, indent=2))
+#-#                trace(f'file saved. {filepath_tmp}')
 
             args = shlex.split(f'{v2ray_path} run')
             p = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -359,18 +366,18 @@ class LaunchProxyMix(object):
             debug(f'conf file saved. {filepath}')
             # launch new process
             args = shlex.split(f'{v2ray_path} run -config {filepath}')
-            p = await asyncio.create_subprocess_exec(*args, stdout=open('/tmp/proxy.log', 'w'), stderr=subprocess.STDOUT, preexec_fn=preexec_ignore_sigint)
+            p = await asyncio.create_subprocess_exec(*args, stdout=open('/dev/shm/proxy.log', 'w'), stderr=subprocess.STDOUT, preexec_fn=preexec_ignore_sigint)
 
         await asyncio.sleep(test_wait_seconds)
         return p, filepath
 
 
-    async def _launch_hysteria(self, node: Node, test_mode: bool, port: int = 0) -> tuple[asyncio.subprocess.Process, str]:
+    async def _launch_hysteria(self, node: Node, measure_mode: bool, port: int = 0) -> tuple[asyncio.subprocess.Process, str]:
         p, filepath = None, ''
 
         nc = NodeConfig()
         settings = nc.genConfig[node.proto](node)
-        if test_mode == True:  # 测试模式下无密码, 不输出日志到文件
+        if measure_mode:  # 评估模式下无密码, 不输出日志到文件
             settings['http']['listen'] = f'127.0.0.1:{port}'
             del settings['http']['user']
             del settings['http']['password']
@@ -389,17 +396,17 @@ class LaunchProxyMix(object):
             debug(f'conf file saved. {filepath}')
             # launch new process
             args = shlex.split(f'{hysteria_path} client --no-check -c {filepath}')
-            p = await asyncio.create_subprocess_exec(*args, stdout=open('/tmp/proxy.log', 'w'), stderr=subprocess.STDOUT, preexec_fn=preexec_ignore_sigint)
+            p = await asyncio.create_subprocess_exec(*args, stdout=open('/dev/shm/proxy.log', 'w'), stderr=subprocess.STDOUT, preexec_fn=preexec_ignore_sigint)
 
         await asyncio.sleep(test_wait_seconds)
         return p, filepath
 
-    async def _launch_hysteria2(self, node: Node, test_mode: bool, port: int = 0) -> tuple[asyncio.subprocess.Process, str]:
+    async def _launch_hysteria2(self, node: Node, measure_mode: bool, port: int = 0) -> tuple[asyncio.subprocess.Process, str]:
         p, filepath = None, ''
 
         nc = NodeConfig()
         settings = nc.genConfig[node.proto](node)
-        if test_mode == True:  # 测试模式下无密码, 不输出日志到文件
+        if measure_mode == True:  # 评估模式下无密码, 不输出日志到文件
             settings['http']['listen'] = f'127.0.0.1:{port}'
             del settings['http']['username']
             del settings['http']['password']
@@ -420,7 +427,7 @@ class LaunchProxyMix(object):
             debug(f'conf file saved. {filepath}')
             # launch new process
             args = shlex.split(f'{hysteria2_path} client --disable-update-check -c {filepath}')
-            p = await asyncio.create_subprocess_exec(*args, stdout=open('/tmp/proxy.log', 'w'), stderr=subprocess.STDOUT, preexec_fn=preexec_ignore_sigint)
+            p = await asyncio.create_subprocess_exec(*args, stdout=open('/dev/shm/proxy.log', 'w'), stderr=subprocess.STDOUT, preexec_fn=preexec_ignore_sigint)
 
         await asyncio.sleep(test_wait_seconds)
         return p, filepath
@@ -471,7 +478,7 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
         nr_succ = 0
 
         p, config_path = await self.launch_proxy(node, True, port)
-        url = random.choice(self.urls)
+        url = choice(self.urls)
         try:
             for i in range(self.nr_try):
                 try:
@@ -479,7 +486,8 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
                     resp = await client.head(url)
                     latency = int((time() - begin) * 1000)
                     nr_succ += 1
-                    #debug(f'{node} times: {i + 1} score:{latency}ms')
+# #                    if test_mode:
+# #                        trace(f'{node} times: {i + 1} score:{latency}ms')
                     score = self._score(latency, 0, score)
                     if nr_succ >= self.nr_min_succ:  # 达到阈值提前退出
                         break
@@ -532,7 +540,7 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
     async def _http_connect(self, node: Node, proxy_auth: aiohttp.BasicAuth|None = None) -> tuple[int, int]:
         score = self._init_score()
         nr_succ = 0
-        url = random.choice(self.urls)
+        url = choice(self.urls)
 
         # https://github.com/encode/httpx/discussions/2350  httpx.URL() does not parse url correctly with curly brackets in password
         p = httpx.Proxy(httpx.URL(f'http://{proxy_host}:{proxy_port}/', username=proxy_user, password=proxy_pass))
@@ -549,7 +557,8 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
                 if nr_succ >= self.nr_min_succ:  # 达到阈值提前退出
                     break
             except Exception as e:
-                debug(f'{node} {i+1}/{self.nr_try} test failed: {type(e)} {e}')
+# #                debug(f'{node} {i+1}/{self.nr_try} test failed: {type(e)} {e}')
+                print('W', end='', file=sys.stderr, flush=True)
                 if self.nr_try - i - 1 + nr_succ < self.nr_min_succ:
                     break
             await asyncio.sleep(self.interval)
@@ -621,46 +630,78 @@ class NodeConfig(object):
         outboundsSetting[0]['settings']['vnext'][0]['users'][0]['encryption'] = arg.get('encryption', "none")
         outboundsSetting[0]['settings']['vnext'][0]['users'][0]['flow'] = arg.get('flow', '')
 
-        outboundsSetting[0]['streamSettings']['network'] = arg['type']
-        outboundsSetting[0]['streamSettings']['tlsSettings']['serverName'] = arg.get('sni') or node.ip
-        outboundsSetting[0]['streamSettings']['tlsSettings']['fingerprint'] = arg.get('fp') or ''
+        network = arg.get('type', '')
+        outboundsSetting[0]['streamSettings']['network'] = network
+        security = arg.get('security', '')
+        outboundsSetting[0]['streamSettings']['security'] = security
 
-        match arg['type']:
+        match security:
+            case 'tls':
+                outboundsSetting[0]['streamSettings']['tlsSettings'] = {
+                    'serverName': arg.get('sni', node.ip),
+                        'allowInsecure': False,
+# #                        'fingerprint': arg.get('fp', ''),
+                        'show': False,
+                    }
+                if 'alpn' in arg:
+                    outboundsSetting[0]['streamSettings']['tlsSettings']['alpn'] = unquote(arg['alpn']).split(',')
+# #                    outboundsSetting[0]['streamSettings']['tlsSettings']['allowInsecure'] = False
+# #                    outboundsSetting[0]['streamSettings']['tlsSettings']['show'] = False
+            case 'reality':
+# #                if 'reality-opts' in arg and arg['reality-opts']:
+                # 参考 https://github.com/XTLS/Xray-examples/blob/main/VLESS-TCP-XTLS-Vision-REALITY/config_client.jsonc
+                outboundsSetting[0]['streamSettings']['realitySettings'] = {
+                    'fingerprint': arg.get('fingerprint', arg.get('fp', 'chrome')),
+                    'serverName': arg.get('sni') or node.ip,
+                    'show': False,
+                    'publicKey': arg.get('public-key', arg.get('pbk', '')),
+                    'shortId': arg.get('short-id', arg.get('sid', '')),
+                    'spiderX': unquote(arg.get('spx', '')),
+                    }
+                if 'public-key' not in arg and 'pbk' not in arg:
+                    warn(f'key \'public-key\'/\'pbk\' not found in {node}, {arg=} {node.source=}')
+                if 'short-id' not in arg and 'sid' not in arg:
+                    error(f'key \'short-id\'/\'sid\' not found in {node}, {arg=} {node.source=}')
+            case '' | 'none' | 'None' | None:
+                del outboundsSetting[0]['streamSettings']['security']
+# #                warn(f'security is empty in vless, {node}, {node.param=}, {node.source=}')
+            case _:
+                warn(f'unknown {security=} in vless, {node}, {node.param=}, {node.source=}')
+
+        match network:
             case 'tcp':
-                del outboundsSetting[0]['streamSettings']['wsSettings']
-                if 'reality-opts' in arg and arg['reality-opts']:
-                    # 参考 https://github.com/XTLS/Xray-examples/blob/main/VLESS-TCP-XTLS-Vision-REALITY/config_client.jsonc
-                    del outboundsSetting[0]['streamSettings']['tlsSettings']
-                    outboundsSetting[0]['streamSettings']['security'] = 'reality'
-                    outboundsSetting[0]['streamSettings']['realitySettings']['serverName'] = arg['sni']
-                    outboundsSetting[0]['streamSettings']['realitySettings']['fingerprint'] = arg['fingerprint']
-                    outboundsSetting[0]['streamSettings']['realitySettings']['publicKey'] = arg['public-key']
-                    outboundsSetting[0]['streamSettings']['realitySettings']['shortId'] = arg['short-id']
+                pass
+# #                warn(f'not implement for {network=}, {node}, {node.param=}, {node.source=}')
             case 'ws':
-                outboundsSetting[0]['streamSettings']['wsSettings']['path'] = arg['path']
-                outboundsSetting[0]['streamSettings']['wsSettings']['headers']['Host'] = arg.get('host', '')
+                outboundsSetting[0]['streamSettings']['tlsSettings'] = {
+                    'serverName': arg.get('sni', node.ip),
+                    }
+                outboundsSetting[0]['streamSettings']['wsSettings'] = {
+                    'path': arg['path'],
+                    'headers': {
+                        'Host': arg.get('host', ''),
+                        }
+                    }
             case 'grpc':
                 outboundsSetting[0]['streamSettings']['grpcSettings'] = {
                     'serviceName': unquote(arg.get('serviceName', '')),
-                    'multiMode': False,
+                    'multiMode': True if arg.get('mode') == 'multi' else False,
                     'idle_timeout': 60,
                     'health_check_timeout': 20,
-                    'permit_without_stream': False,
-                    'initial_windows_size': 0
+                    'permit_without_stream': False,  # True,
+                    'initial_windows_size': 0,  # 35536, 
                     }
+            case '' | 'none' | 'None' | None:
+                del outboundsSetting[0]['streamSettings']['network']
+# #                warn(f'network is empty in vless, {node}, {node.param=}, {node.source=}')
             case _:
-                warn(f'unknown type in vless {arg["type"]}, {node}, {node.param=}, url={node.source}')
-
-        if arg['security'] is None or arg['security'] == 'none':
-            del outboundsSetting[0]['streamSettings']['security']
-        else:
-            if not outboundsSetting[0]['streamSettings']['security']:  # 
-                outboundsSetting[0]['streamSettings']['security'] = arg['security']
+                warn(f'unknown {network=} in vless, {node}, {node.param=}, {node.source=}')
 
         setting = deepcopy(conf_tpl)
         setting['inbounds'] = self.doInboundSetting()
         setting['outbounds'] = outboundsSetting
         return setting
+
 
     def do_trojan(self, node: Node) -> tuple[dict, dict]:
         assert node.proto == 'trojan'
@@ -674,6 +715,7 @@ class NodeConfig(object):
         setting['inbounds'] = self.doInboundSetting()
         setting['outbounds'] = outboundsSetting
         return setting
+
 
     def do_hysteria(self, node: Node) -> tuple[dict, dict]:
         assert node.proto == 'hysteria'
@@ -693,7 +735,6 @@ class NodeConfig(object):
         settings['fast_open'] = arg['fastopen']
         settings['hop_interval'] = 120
         settings['obfs'] = arg['obfs']
-
         return settings
 
     def do_hysteria2(self, node: Node) -> tuple[dict, dict]:
@@ -853,7 +894,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             #debug(f'ss:{_node}')
                             l_node.append(Node(proto=_proto, uuid='', ip=_ip, port=int(_port), param=_extra, alias=_alias, source=url))
                         except Exception as e:
-                            warn(f'error parse {e}, {_node=}, {url=}')
+                            debug(f'error parse {e}, {_node=}, {url=}')
                     else:  #  整体base64编码
                         try:
                             _method, _password, _ip, _port = re.split(':|@', _s, 3)
@@ -886,11 +927,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         if 'security' not in _extra:
                             _extra['security'] = None
                         if 'type' not in _extra:
-                            if 'network' in _extra:
-                                _extra['type'] = _extra['network']
-                            else:
-                                debug(f'parse vless, no \'type\' and \'network\' in {_node=}, {url=}')
-                                continue
+                            _extra['type'] = 'tcp'
+                            trace(f'parse vless, \'type\' fill to \'tcp\' in {_node=}, {url=}')
                         l_node.append(Node(proto=_proto, uuid=_uuid, ip=_ip, port=int(_port), param=_extra, alias=_alias, source=url))
                     except Exception as e:
                         warn(f'got error when add vless node {e} {_node=} {url=}')
@@ -945,7 +983,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         return l_node
 
 
-    async def _tmpDetectFreeNodeFileName(self) -> list[str]:
+    async def _tmpDetectFreeNodeFileName(self) -> list[str]:  # TODO: 20240301不用了, 过段时间删
         """临时加上，用来尝试获取非固定的文件名
         """
         l_url = []
@@ -1069,7 +1107,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Barabama/FreeNodes/master/nodes/halekj.txt' or \
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Mahdi0024/ProxyCollector/master/sub/proxies.txt' or \
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vmess.txt' or \
-           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt':
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Japan/config.txt' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/United%20States/config.txt' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Germany/config.txt' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Singapore/config.txt' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Austria/config.txt':
             r = b64encode(r.encode())
 
         # 特殊处理
@@ -1229,7 +1272,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
 
         if not (s := b64d(r, url)):
-            error(f'{name} decode failed {url} for {r[:100]}')
+            error(f'{name} decode failed for r[:100]={r[:100]}, {url=}')
             return []
         ls = s.split('\n')
 
@@ -1366,10 +1409,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         today = datetime.today()
         yesterday = today + timedelta(days=-1)
         beforeyesterday = yesterday + timedelta(days=-1)
-        l_freenode_url = await self._tmpDetectFreeNodeFileName()
+# #        l_freenode_url = await self._tmpDetectFreeNodeFileName()
         l_mibei_url = await self._tmpDetectMiBeiFileName()
         #l_url = []  # debug only
-        l_source = [*l_freenode_url,
+        l_source = [  # *l_freenode_url,
+            f'https://freenode.me/wp-content/uploads/{today.year}/{today.month:02d}/{today.month:02d}{today.day:02d}.txt',
+            f'https://freenode.me/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.month:02d}{yesterday.day:02d}.txt',
             *l_mibei_url,
             f'https://clashnode.com/wp-content/uploads/{today.year}/{today.month:02d}/{today.strftime("%Y%m%d")}.txt',
             f'https://clashnode.com/wp-content/uploads/{yesterday.year}/{yesterday.month:02d}/{yesterday.strftime("%Y%m%d")}.txt',
@@ -1452,6 +1497,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/ss.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt',
+
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Japan/config.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/United%20States/config.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Germany/config.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Singapore/config.txt',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Austria/config.txt',
         ]
         #l_source = ['https://mirror.ghproxy.com/https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
         #l_source = l_source[:5]+ l_source[-5:]  # debug only
@@ -1482,6 +1533,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
     async def uniq_nodes(self, name: str, e_exit: asyncio.Event, q_in: asyncio.Queue, q_out: asyncio.Queue):
         st_node = set()
         nr = 0
+        last  = time()
 # #        debug(f'{name} init {q_in.qsize()} node(s)')
         t_exit = asyncio.create_task(e_exit.wait())
         while 1:
@@ -1493,8 +1545,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             node = t_q.result()
             q_in.task_done()
             if node is None:
-                st_node.clear()
-                debug(f'{name} set cleared.')
+                if (duration:= time() - last) >= 24 * 3600:
+                    st_node.clear()
+                    debug(f'{name} set cleared, {duration=}.')
+                    last = time()
+                else:
+                    debug(f'{name} set not cleared, {duration=}.')
                 continue
             nr += 1
 
@@ -1644,17 +1700,19 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     ping = None
                 if ping:
                     if ping < 1000:  # 过滤慢速节点
-                        info(f'{name} conn succ {ping}{at.unit} {node.area} {node} {node.alias}')
+                        info(f'{name} conn succ <green>{ping}{at.unit}</green> {node.area} {node} {node.alias}')
                         node.score = ping
                         node.score_unit = at.unit
                         await q_out.put((node.score, node))
                         e_increase.set()
                     else:
-# #                        debug(f'skip high latency node {ping}{at.unit} {node} {node.alias}')
+                        debug(f'{name} conn succ <yellow>{ping}{at.unit}</yellow> {node.area} {node} {node.alias}')
                         nr_filter += 1
 # #                    debug(f'{name} now {q_out.qsize()} candidate.')
                 else:
-    # #                debug(f'{name} bad {node}')
+                    pass
+#-#                    if test_mode:
+                    trace(f'{name} bad {node.area} {node}')
                     nr_filter += 1
         finally:
             await at.clean()
@@ -1682,8 +1740,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
             if sys.platform != 'win32' and not test_mode:
                 p, filepath = await self.launch_proxy(node)
-                succ(f'{name} service started, pid={p.pid}')
-                at = ProxyTest(nr_try=2, min_resp_count=1, interval=8, timeout=7)
+ 8845               succ(f'{name} service {node.area} {score}{node.score_unit} {node} started, pid={p.pid}')
+                at = ProxyTest(nr_try=2, min_resp_count=1, interval=5, timeout=5)
                 while 1:
                     #debug(f'{name} check node avaliable ...')
                     ping, nr_succ = await at._http_connect(node, proxy_auth=proxy_auth)
@@ -1693,9 +1751,9 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         break
                     else:
                         #info(f'{name} wait for next check ...')
-                        print(f'{datetime.now().strftime("%H:%M:%S")}_{ping} ', end='', file=sys.stderr, flush=True)
+                        print(f'[{datetime.now().strftime("%H:%M:%S")}_{ping}]', end='', file=sys.stderr, flush=True)
 
-                        l_task = [asyncio.create_task(event_exit.wait()), asyncio.create_task(p.wait()), asyncio.create_task(asyncio.sleep(180))]
+                        l_task = [asyncio.create_task(event_exit.wait()), asyncio.create_task(p.wait()), asyncio.create_task(asyncio.sleep(120))]
                         t_exit, t_process_exit, t_timeout = l_task
                         done, _ = await asyncio.wait(l_task, return_when=asyncio.FIRST_COMPLETED)
                         if t_timeout in done:
@@ -1726,8 +1784,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 try:
                     await asyncio.wait_for(event_exit.wait(), 300)
                 except asyncio.exceptions.TimeoutError:
-                    pass
-                    debug(f'{name} wake up')
+                    trace(f'{name} wake up')
                 else:
 # #                    info(f'{name} got exit flag, exit')
                     break
@@ -1761,16 +1818,16 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     await q_node.put(None)  # 告诉排重清除历史数据
                     if test_mode:
                         l_source = [
-# #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vmess.txt',
-# #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/ss.txt',
-# #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/trojan.txt',
-# #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vless.txt',
-# #                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt',
-                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/shirkerboy/scp/main/sub',
+                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes',
                                     ]
-                        l_s = ['vless://cd7db63e-4904-453b-8f93-bf56d1fd53e5@[::ffff:6811:e94f]:443?security=tls&sni=vm.webobin.site&type=grpc&serviceName=%40%6ee%74work%6e%69m&fp=chrome#4Sarina-11216',
+                        l_source = []
+                        l_s = [
+# #                                'vless://308bab94-18e4-43f5-9c35-a89d95af2f25@104.18.202.209:443?mode=gun&security=tls&encryption=none&alpn=h2,http/1.1&fp=firefox&type=grpc&serviceName=Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android&serviceName=%40s%70ik%65%76%70%6e&sni=dl.spikevpn.cfd#[🇨🇦]t.me/ConfigsHu',
+# #                                'vless://5d0245cd-8412-4a32-b52c-ef810651e650@190.93.247.155:443?mode=gun&security=tls&encryption=none&alpn=h2,http/1.1&fp=chrome&type=grpc&serviceName=@Digiv2ray,@Digiv2ray,@Digiv2ray,@Digiv2ray,&sni=digi--v2raycncfs.RadioTeHran.oRG.#%40V2ray1_Ng+ALL',
+# #                                'vless://a99dc06c-bf43-4264-9b2b-615a4f69f30f@MTN.Vpn-Mikey.cfd:443?mode=gun&security=tls&encryption=none&alpn=h2,http/1.1&fp=chrome&type=grpc&serviceName=@Vpn_Mikey،@Vpn_Mikey&sni=Germany.Vpn-Mikey.cfd#[🇨🇦]t.me/ConfigsHu',
+                                'vless://717ef3fe-1213-4e09-ac4a-5ea693b49368@gpc.netflix.net:2083?type=grpc&mode=gun&serviceName=@vmesskhodam,@vmesskhodam,@vmesskhodam,@vmesskhodam,@vmesskhodam&security=tls&sni=a.lars1.nl#[🇨🇦]t.me/ConfigsHu',
+# #                                'vless://0cfa9e5a-b641-4c5a-b090-df50c8025358@is.snappfoodd.top:2083?type=grpc&mode=gun&serviceName=@vmesskhodam,@vmesskhodam,@vmesskhodam,@vmesskhodam,@vmesskhodam&security=tls&sni=a.lars1.nl#[🇨🇷]t.me/ConfigsHu',
                                ]
-                        l_s = []
                         if l_s:
                             l_node = self.__class__._parseProto(l_s, 'test')
                             for _node in l_node:
@@ -1778,6 +1835,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                                 await q_node.put(_node)
                     else:
                         l_source = await self._getNodeUrl()
+                        shuffle(l_source)
                         freevpnx = asyncio.create_task(self._tmp_freevpnx(q_node))
                         ssfree = asyncio.create_task(self._tmp_ssfree(q_node))
                         tolinkshare = asyncio.create_task(self._tmp_tolinkshare(q_node))
@@ -1789,12 +1847,15 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
                     time_add = time()
                 else:
-                    debug(f'{name} in processing')
+# #                    debug(f'{name} in processing')
+                    print('=', end='', file=sys.stderr, flush=True)
             else:
                 if nr_remain > 1:
-                    debug(f'{name} remain {nr_remain} candidate, do nothing')
+# #                    debug(f'{name} remain {nr_remain} candidate, do nothing')
+                    print(f'.{nr_remain}.', end='', file=sys.stderr, flush=True)
                 else:
-                    debug(f'{name} remain {nr_remain} candidate, frequently check, do nothing')
+# #                    debug(f'{name} remain {nr_remain} candidate, frequently check, do nothing')
+                    print(f'*{nr_remain}*', end='', file=sys.stderr, flush=True)
 
             t_increase, t_decrease, t_timeout = asyncio.create_task(e_increase.wait()), asyncio.create_task(e_decrease.wait()), asyncio.create_task(asyncio.sleep(600 if recent_put else 60))
             done, _ = await asyncio.wait({t_exit, t_increase, t_decrease, t_timeout}, return_when=asyncio.FIRST_COMPLETED)
@@ -1807,52 +1868,21 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 e_increase.clear()
                 nr_remain = q_tested_node.qsize()
                 if nr_remain >= 10:
-                    debug(f'{nr_remain=}, remove tasks in q_url/node/uniq_node/ip_node/area_node/conn_node')
-                    # 终止查找
-                    while 1:
-                        try:
-                            q_url.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                        else:
-                            q_url.task_done()
-                    while 1:
-                        try:
-                            q_node.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                        else:
-                            q_node.task_done()
-                    while 1:
-                        try:
-                            q_uniq_node.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                        else:
-                            q_uniq_node.task_done()
-                    while 1:
-                        try:
-                            q_ip_node.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                        else:
-                            q_ip_node.task_done()
-                    while 1:
-                        try:
-                            q_area_node.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                        else:
-                            q_area_node.task_done()
-                    while 1:
-                        try:
-                            q_conn_node.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                        else:
-                            q_conn_node.task_done()
+                    if not test_mode:
+                        debug(f'{nr_remain=}, remove tasks in q_url/node/uniq_node/ip_node/area_node/conn_node')
+                        # 终止查找
+                        for _q in (q_url, q_node, q_uniq_node, q_ip_node, q_area_node, q_conn_node):
+                            while 1:
+                                try:
+                                    _q.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    break
+                                else:
+                                    _q.task_done()
+                    else:
+                        debug(f'in test_mode, not stop measuring node(s)')
                 else:
-                    debug(f'now {nr_remain=}')
+                    trace(f'now {nr_remain=}')
             else:
                 e_decrease.clear()
                 debug(f'{name} candidate decreased to {q_tested_node.qsize()}, check')
@@ -1924,19 +1954,29 @@ if __name__ == '__main__':
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     parser = argparse.ArgumentParser(prog='make_proxy.py')
     parser.add_argument('-t', '--test', action='store_true', help='in test mode')
-    parser.add_argument('-l', '--loglevel', choices=['debug', 'info'], default='debug', help='set log level')
+    parser.add_argument('-l', '--loglevel', choices=['trace', 'debug', 'info'], default='debug', help='set log level')
     args = parser.parse_args()
 
     # 初始化日志
     logger.remove()
-    logger.add(sys.stderr, colorize=True, format='<green>{time:YYYYMMDD_HHmmss}</green><cyan>{level:.1s}</cyan>:{module}.{function}:{line}|<level>{message}</level>', filter='', level='DEBUG' if args.loglevel == 'debug' else 'INFO')
+    logger.add(sys.stderr, colorize=True, format='<green>{time:YYYYMMDD_HHmmss}</green><cyan>{level:.1s}</cyan>:{module}.{function}:{line}|<level>{message}</level>', filter='', level=args.loglevel.upper())
     mylogger = logger.opt(colors=True)
-    mylogger.level('INFO', color='<white>')
-    mylogger.level('DEBUG', color='<blue>')
-    mylogger.level('WARNING', color='<yellow>')
-    mylogger.level('ERROR', color='<RED><white>')
-    mylogger.level('SUCCESS', color='<GREEN><white>')
-    succ, info, debug, error, warn, exception = mylogger.success, mylogger.info, mylogger.debug, mylogger.error, mylogger.warning, mylogger.exception
+    mylogger.level('TRACE', color='<fg blue>')
+    mylogger.level('DEBUG', color='<fg light-blue>')
+    mylogger.level('INFO', color='<bold><fg white>')
+    mylogger.level('SUCCESS', color='<bold><fg GREEN>')
+    mylogger.level('WARNING', color='<bold><fg yellow>')
+    mylogger.level('ERROR', color='<bold><bg RED><fg white>')
+    mylogger.level('CRITICAL', color='<bold><bg WHITE><fg red>')
+    trace, debug, info, succ, warn, error, critical = mylogger.trace, mylogger.debug, mylogger.info, mylogger.success, mylogger.warning, mylogger.error, mylogger.critical
+#-#    trace(f'this is trace')
+#-#    debug(f'this is debug')
+#-#    info(f'this is info')
+#-#    succ(f'this is succ')
+#-#    warn(f'this is warning')
+#-#    error(f'this is error')
+#-#    critical(f'this is critical')
+#-#    sys.exit(0)
 
     asyncio.run(main(args.test), debug=args.test)
 
