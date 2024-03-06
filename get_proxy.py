@@ -52,6 +52,7 @@
 # 20240229 增加节点, 改进测试模式下的日志输出
 # 20240301 调整日志，改进vless生成配置的逻辑, 改进代码, 缩短测试当前节点的时间间隔
 # 20240305 改进vless配置, uniq_node以天为间隔做节点排重，launcher改变test_mode参数名为measure_mode, 代理日志输出到/dev/shm目录
+# 20240306 ProxySupportMix不再做为ProxyTest的基类，减少了40个协程总共8s的启动时间(aiohttp连接池的初始化时间长？)
 
 
 import binascii
@@ -331,7 +332,7 @@ class LaunchProxyMix(object):
         nc = NodeConfig()
         settings = nc.genConfig[node.proto](node)
         if measure_mode:
-            settings['inbounds'].pop()  # 删除http2
+            settings['inbounds'].pop()  # 删除http_noauth
             settings['inbounds'].pop()  # 删除socks
             settings['inbounds'][0]['listen'] = '127.0.0.1'
             settings['inbounds'][0]['port'] = port
@@ -433,7 +434,7 @@ class LaunchProxyMix(object):
         return p, filepath
 
 
-class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
+class ProxyTest(AsyncContextDecorator, LaunchProxyMix):
     '''代理可用性测试
     '''
 
@@ -455,7 +456,6 @@ class ProxyTest(ProxySupportMix, AsyncContextDecorator, LaunchProxyMix):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        await self.clean()
         return False
 
 
@@ -583,11 +583,11 @@ class NodeConfig(object):
     def doInboundSetting(self):
         setting = deepcopy(inboundsSetting)
         # http with auth
-        setting[0]['port'] = proxy_port
-        setting[0]['settings']['accounts'][0]['user'] = proxy_user
-        setting[0]['settings']['accounts'][0]['pass'] = proxy_pass
+# #        setting[0]['port'] = proxy_port
+# #        setting[0]['settings']['accounts'][0]['user'] = proxy_user
+# #        setting[0]['settings']['accounts'][0]['pass'] = proxy_pass
         # http without auth
-        setting[2]['port'] = proxy_port + 1
+# #        setting[2]['port'] = proxy_port + 1
         return setting
 
     def do_vmess(self, node: Node) -> tuple[dict, dict]:
@@ -813,8 +813,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             _proto = m.scheme
             match _proto:
                 case 'vmess':  # json(key: <id><add><path><port><host><aid><tls><ps>)
-                    tmp = b64d(m.netloc + m.path, url)
-                    if not tmp:
+                    if not (tmp := b64d(m.netloc + m.path, url)):
                         debug('vemss base64 parse failed {_node=} {url=}')
                         continue
                     try:
@@ -861,8 +860,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 case 'ss':  # base64(<method>:<password>)@<ip>:<port>#<alias>
                     _uuid = None
                     # 先判断是否整体为base64编码
-                    _s = b64d(m.netloc.encode(), url, False)
-                    if not _s:  # 非整体base64编码
+                    if not (_s := b64d(m.netloc.encode(), url, False)):   # 非整体base64编码
                         _tmp, _ip_port = m.netloc.rsplit('@', 1)
                         try:
                             _ip, _port = _ip_port.rsplit(':', 1)
@@ -1715,7 +1713,6 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     trace(f'{name} bad {node.area} {node}')
                     nr_filter += 1
         finally:
-            await at.clean()
             await client.aclose()
 # #        info(f'{name} exit. {nr} processed, {nr_filter} filtered.')
         return nr, nr_filter
@@ -1730,7 +1727,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             t_q = asyncio.create_task(q_in.get())
             done, _ = await asyncio.wait({t_exit, t_q}, return_when=asyncio.FIRST_COMPLETED)
             if t_exit in done:
-                info(f'{name} got event_exit, break')
+# #                debug(f'{name} got event_exit, break')
                 break
             score, node = t_q.result()
             nr += 1
@@ -1740,7 +1737,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 
             if sys.platform != 'win32' and not test_mode:
                 p, filepath = await self.launch_proxy(node)
- 8845               succ(f'{name} service {node.area} {score}{node.score_unit} {node} started, pid={p.pid}')
+                succ(f'{name} service {node.area} {score}{node.score_unit} {node} started, pid={p.pid}')
                 at = ProxyTest(nr_try=2, min_resp_count=1, interval=5, timeout=5)
                 while 1:
                     #debug(f'{name} check node avaliable ...')
@@ -1751,7 +1748,8 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                         break
                     else:
                         #info(f'{name} wait for next check ...')
-                        print(f'[{datetime.now().strftime("%H:%M:%S")}_{ping}]', end='', file=sys.stderr, flush=True)
+# #                        print(f'[{datetime.now().strftime("%H:%M:%S")}_{ping}]', end='', file=sys.stderr, flush=True)
+                        print(f'[{p.pid}_{ping}]', end='', file=sys.stderr, flush=True)
 
                         l_task = [asyncio.create_task(event_exit.wait()), asyncio.create_task(p.wait()), asyncio.create_task(asyncio.sleep(120))]
                         t_exit, t_process_exit, t_timeout = l_task
@@ -1778,7 +1776,6 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     os.remove(filepath)
                 except:
                     pass
-                await at.clean()
             elif test_mode:
                 warn(f'{name} in test mode, {q_in.qsize()} candidate')
                 try:
@@ -1911,29 +1908,29 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         done, _ = await asyncio.wait(l_url2node)
         l = [_done.result() for _done in done]
         s = sum(l)
-        info(f'{len(l_url2node)} l_url2node exited. processed urls: {s} {l}')
+        debug(f'{len(l_url2node)} l_url2node exited. processed urls: {s} {l}')
         done = await uniq_nodes
-        info(f'uniq_nodes exited. uniq, total: {done}')
+        debug(f'uniq_nodes exited. uniq, total: {done}')
         done, _ = await asyncio.wait(l_host2ip)
         l = [_done.result() for _done in done]
         s = list(map(sum, zip(*l)))
-        info(f'{len(l_host2ip)} l_host2ip exited. total, filtered: {s} {l}')
+        debug(f'{len(l_host2ip)} l_host2ip exited. total, filtered: {s} {l}')
         done, _ = await asyncio.wait(l_ip2area)
         l = [_done.result() for _done in done]
         s = list(map(sum, zip(*l)))
-        info(f'{len(l_ip2area)} l_ip2area exited. total, filtered: {s} {l}')
+        debug(f'{len(l_ip2area)} l_ip2area exited. total, filtered: {s} {l}')
         done, _ = await asyncio.wait(l_filter_bad_ip)
         l = [_done.result() for _done in done]
         s = list(map(sum, zip(*l)))
-        info(f'{len(l_filter_bad_ip)} l_filter_bad_ip exited. total, filtered: {s} {l}')
+        debug(f'{len(l_filter_bad_ip)} l_filter_bad_ip exited. total, filtered: {s} {l}')
         done, _ = await asyncio.wait(l_measure_node)
         l = [_done.result() for _done in done]
         s = list(map(sum, zip(*l)))
-        info(f'{len(l_measure_node)} l_measure_node exited. total, filtered: {s} {l}')
+        debug(f'{len(l_measure_node)} l_measure_node exited. total, filtered: {s} {l}')
         done = await launch
-        info(f'launch exited. total, remain: {done}')
+        debug(f'launch exited. total, remain: {done}')
         done = await dispatch 
-        info(f'dispatch exited. nr_dispatch, candidate_remain: {done}')
+        debug(f'dispatch exited. nr_dispatch, candidate_remain: {done}')
 
 
 @logger.catch
