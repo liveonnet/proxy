@@ -53,6 +53,7 @@
 # 20240301 调整日志，改进vless生成配置的逻辑, 改进代码, 缩短测试当前节点的时间间隔
 # 20240305 改进vless配置, uniq_node以天为间隔做节点排重，launcher改变test_mode参数名为measure_mode, 代理日志输出到/dev/shm目录
 # 20240306 ProxySupportMix不再做为ProxyTest的基类，减少了40个协程总共8s的启动时间(aiohttp连接池的初始化时间长？)
+# 20240312 优化代码
 
 
 import binascii
@@ -147,7 +148,7 @@ class Node(object):
             return f'<N {self.proto[:2]}:{self.ip}:{self.port}>'
 
     def __hash__(self):
-        return hash((str(self), self.uuid, json.dumps(self.param)))
+        return hash((str(self), self.uuid, json.dumps(self.param, sort_keys=True)))
 
     def __lt__(self, other):
         if self.score and other.score:
@@ -282,7 +283,7 @@ class ProxySupportMix(object):
         self.headers = headers
         self.timeout = aiohttp.ClientTimeout(total=60.0, connect=10.0, sock_connect=15.0, sock_read=30.0)
         self.sslcontext = ssl.create_default_context(cafile=certifi.where())
-        self.connector = aiohttp.TCPConnector(force_close=True, limit=500, limit_per_host=0, enable_cleanup_closed=True, loop=None, ssl=self.sslcontext)
+        self.connector = aiohttp.TCPConnector(force_close=False, limit=200, limit_per_host=5, enable_cleanup_closed=True, loop=None, ssl=self.sslcontext)
         self.client = aiohttp.ClientSession(headers=headers, timeout=self.timeout, connector=self.connector, connector_owner=True)
 
     async def clean(self):
@@ -449,7 +450,7 @@ class ProxyTest(AsyncContextDecorator, LaunchProxyMix):
         self.o_timeout = httpx.Timeout(connect=8.0, read=5.0, write=5.0, pool=2.0)
         self.interval = interval  # 代理每次测试之间的休眠时间
 # #        self.urls = urls or ['https://www.google.com/', 'https://www.youtube.com/' ]  # 用于连通测试的目标站点，能访问到认为是连通
-        self.urls = urls or ['https://www.youtube.com/', ]  # 用于连通测试的目标站点，能访问到认为是连通
+        self.urls = urls or ['https://www.youtube.com/@wangzhian/streams', ]  # 用于连通测试的目标站点，能访问到认为是连通
         self.unit = unit  # 计量单位
 
     async def __aenter__(self):
@@ -778,7 +779,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 with attempt:
                     if attempt.retry_state.attempt_number == max_retry + 1:
                         proxy_auth = aiohttp.BasicAuth(proxy_user, proxy_pass)
-                        debug(f'getting {url} using proxy {attempt.retry_state.attempt_number}/{max_retry}...')
+                        debug(f'getting {url} <yellow>using proxy</yellow> {attempt.retry_state.attempt_number}/{max_retry}...')
                         r = await self.client.get(url, timeout=10, proxy=proxies['http://'], proxy_auth=proxy_auth, ssl=False)
                     else:
                         r = await self.client.get(url, timeout=10, ssl=True)
@@ -813,7 +814,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             _proto = m.scheme
             match _proto:
                 case 'vmess':  # json(key: <id><add><path><port><host><aid><tls><ps>)
-                    if not (tmp := b64d(m.netloc + m.path, url)):
+                    if not (tmp := b64d(m.netloc + m.path, url, False)):
                         debug('vemss base64 parse failed {_node=} {url=}')
                         continue
                     try:
@@ -830,10 +831,33 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             l_node.append(Node(proto=_proto, param=_param, uuid=_param['id'], ip=_param['add'], port=int(_param['port']), alias=_param.get('ps', _param['add']), source=url))
                         except Exception as e:
                             warn(f'got error when add vmess node {e} {_param=} {url=}')
-                case 'ssr':  # 不支持ssr
-                    pass
-                case 'tuic':  # 不支持tuic
-                    pass
+                case 'vless':  # <uuid>@<ip>:<port>?encryption=<>&security=<>&sni=<>&type=<>&host=<>&path=<>#<alias>
+                    try:
+                        _idx1 =m.netloc.rfind(':')
+                        assert _idx1 != -1
+                        _port = m.netloc[_idx1 + 1 :]
+                        _idx2 = m.netloc.find('@')
+                        assert _idx2 != -1
+                        _uuid = m.netloc[:_idx2]
+                        _ip = m.netloc[_idx2 + 1 : _idx1]
+                        if _ip.find('[') != -1 and _ip.find(']') != -1:
+                            _ip = _ip[1:-1]
+# #                            debug(f'got ipv6 address {_ip=}: {_node}, {url=}')
+                        _extra = parse_qs(m.query) if m.query else {}
+                        _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
+                        _alias = unquote_plus(m.fragment)
+                        if 'path' not in _extra:
+                            _extra['path'] = '/'
+                        if 'security' not in _extra:
+                            _extra['security'] = None
+                        if 'type' not in _extra:
+# #                            _extra['type'] = 'tcp'
+# #                            trace(f'parse vless, \'type\' fill to \'tcp\' in {_node=}, {url=}')
+# #                            trace(f'parse vless, SKIP cause no \'type\' {_node=}, {url=}')
+                            continue
+                        l_node.append(Node(proto=_proto, uuid=_uuid, ip=_ip, port=int(_port), param=_extra, alias=_alias, source=url))
+                    except Exception as e:
+                        warn(f'got error when add vless node {e} {_node=} {url=}')
                 case 'trojan': # <password>@<ip>:<port>?security=<>&sni=<>&type=<>&headerType=<>#<alias>
                     try:
                         _idx1 =m.netloc.rfind(':')
@@ -870,7 +894,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             warn(f'skip one ss node cause got ValueError: {e} {_ip_port=} {_node=} {url=}')
                             continue
                         if _tmp.count('-') != 4:
-                            _uuid = b64d(_tmp, url)
+                            _uuid = b64d(_tmp, url, False)
                             _uuid = _uuid.decode() if type(_uuid) is bytes else _uuid
                             if not _uuid:
 # #                                debug(f'_uuid no need decode, {_node=} {url=}')
@@ -892,7 +916,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                             #debug(f'ss:{_node}')
                             l_node.append(Node(proto=_proto, uuid='', ip=_ip, port=int(_port), param=_extra, alias=_alias, source=url))
                         except Exception as e:
-                            debug(f'error parse {e}, {_node=}, {url=}')
+                            debug(f'error parse {type(e)} {e}, {_node=}, {url=}')
                     else:  #  整体base64编码
                         try:
                             _method, _password, _ip, _port = re.split(':|@', _s, 3)
@@ -904,32 +928,10 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
 #                            debug(f'add simple ss node {_s} {m}')
                         except Exception as e:
                             warn(f'error parse {e}, {_node=}, {url=}')
-
-                case 'vless':  # <uuid>@<ip>:<port>?encryption=<>&security=<>&sni=<>&type=<>&host=<>&path=<>#<alias>
-                    try:
-                        _idx1 =m.netloc.rfind(':')
-                        assert _idx1 != -1
-                        _port = m.netloc[_idx1 + 1 :]
-                        _idx2 = m.netloc.find('@')
-                        assert _idx2 != -1
-                        _uuid = m.netloc[:_idx2]
-                        _ip = m.netloc[_idx2 + 1 : _idx1]
-                        if _ip.find('[') != -1 and _ip.find(']') != -1:
-                            _ip = _ip[1:-1]
-# #                            debug(f'got ipv6 address {_ip=}: {_node}, {url=}')
-                        _extra = parse_qs(m.query) if m.query else {}
-                        _extra = dict((_k,_v[0]) for _k,_v in _extra.items())
-                        _alias = unquote_plus(m.fragment)
-                        if 'path' not in _extra:
-                            _extra['path'] = '/'
-                        if 'security' not in _extra:
-                            _extra['security'] = None
-                        if 'type' not in _extra:
-                            _extra['type'] = 'tcp'
-                            trace(f'parse vless, \'type\' fill to \'tcp\' in {_node=}, {url=}')
-                        l_node.append(Node(proto=_proto, uuid=_uuid, ip=_ip, port=int(_port), param=_extra, alias=_alias, source=url))
-                    except Exception as e:
-                        warn(f'got error when add vless node {e} {_node=} {url=}')
+                case 'ssr':  # 不支持ssr
+                    pass
+                case 'tuic':  # 不支持tuic
+                    pass
                 case 'hysteria':  # <ip>:<port>?auth=<>&insecure=<>&upmbps=<>&downmbps=<>&alph=<>&obfs=<>&protocol=<>&fastopen=<>#<name>
                     try:
                         _ip, _port = m.netloc.rsplit(':', 1)
@@ -976,7 +978,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 case '':
                     pass
                 case _:
-                    warn(f'unknown {_proto=} {_node=}, {url=}')
+                    warn(f'SKIP {_proto=} {_node=}, {url=}')
 
         return l_node
 
@@ -988,7 +990,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
         today = datetime.today()
         yesterday = today + timedelta(days=-1)
         beforeyesterday = yesterday + timedelta(days=-1)
-        for _day in [today, yesterday, beforeyesterday]:
+        for _day in (today, yesterday, beforeyesterday):
             url = f'https://freenode.me/wp-content/uploads/{_day.year}/{_day.month:02d}/{_day.month:02d}{_day.day:02d}{{}}.txt'
             l_cor = [self.client.head(url.format(x if x else ''), timeout=3, ssl=False) for x in range(1)]
             #l_cor.append(self.client.head(f'https://freenode.me/wp-content/uploads/{_day.year}/{_day.month:02d}/{_day.month:02d}{_day.day:02d}.txt', timeout=3, ssl=False))
@@ -1110,7 +1112,9 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/United%20States/config.txt' or \
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Germany/config.txt' or \
            url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Singapore/config.txt' or \
-           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Austria/config.txt':
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Austria/config.txt' or \
+           url == 'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/sub/sub_merge.txt':
+
             r = b64encode(r.encode())
 
         # 特殊处理
@@ -1269,7 +1273,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             return l_node
 
 
-        if not (s := b64d(r, url)):
+        if not (s := b64d(r, url, False)):
             error(f'{name} decode failed for r[:100]={r[:100]}, {url=}')
             return []
         ls = s.split('\n')
@@ -1501,6 +1505,12 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Germany/config.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Singapore/config.txt',
             'https://mirror.ghproxy.com/https://raw.githubusercontent.com/Epodonios/bulk-xray-v2ray-vless-vmess-...-configs/main/sub/Austria/config.txt',
+
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zzz6839/SubCrawler/main/sub/share/all',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zjfb/SubCrawler/main/sub/share/all',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/QQnight/SubCrawler/main/sub/share/all',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/zhangkaiitugithub/SubCrawler/main/sub/share/all',
+            'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/sub/sub_merge.txt',
         ]
         #l_source = ['https://mirror.ghproxy.com/https://raw.githubusercontent.com/sun9426/sun9426.github.io/main/subscribe/v2ray.txt', ]
         #l_source = l_source[:5]+ l_source[-5:]  # debug only
@@ -1552,8 +1562,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                 continue
             nr += 1
 
-            h = hash(node)
-            if h not in st_node:
+            if (h:=hash(node)) not in st_node:
                 st_node.add(h)
                 await q_out.put(node)
 
@@ -1815,9 +1824,10 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                     await q_node.put(None)  # 告诉排重清除历史数据
                     if test_mode:
                         l_source = [
-                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/LalatinaHub/Mineral/master/result/nodes',
+                                    'https://mirror.ghproxy.com/https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/sub/sub_merge.txt',
+
                                     ]
-                        l_source = []
+# #                        l_source = []
                         l_s = [
 # #                                'vless://308bab94-18e4-43f5-9c35-a89d95af2f25@104.18.202.209:443?mode=gun&security=tls&encryption=none&alpn=h2,http/1.1&fp=firefox&type=grpc&serviceName=Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android,Telegram:@Archive_Android&serviceName=%40s%70ik%65%76%70%6e&sni=dl.spikevpn.cfd#[🇨🇦]t.me/ConfigsHu',
 # #                                'vless://5d0245cd-8412-4a32-b52c-ef810651e650@190.93.247.155:443?mode=gun&security=tls&encryption=none&alpn=h2,http/1.1&fp=chrome&type=grpc&serviceName=@Digiv2ray,@Digiv2ray,@Digiv2ray,@Digiv2ray,&sni=digi--v2raycncfs.RadioTeHran.oRG.#%40V2ray1_Ng+ALL',
@@ -1825,6 +1835,7 @@ class NodeProcessor(ProxySupportMix, LaunchProxyMix):
                                 'vless://717ef3fe-1213-4e09-ac4a-5ea693b49368@gpc.netflix.net:2083?type=grpc&mode=gun&serviceName=@vmesskhodam,@vmesskhodam,@vmesskhodam,@vmesskhodam,@vmesskhodam&security=tls&sni=a.lars1.nl#[🇨🇦]t.me/ConfigsHu',
 # #                                'vless://0cfa9e5a-b641-4c5a-b090-df50c8025358@is.snappfoodd.top:2083?type=grpc&mode=gun&serviceName=@vmesskhodam,@vmesskhodam,@vmesskhodam,@vmesskhodam,@vmesskhodam&security=tls&sni=a.lars1.nl#[🇨🇷]t.me/ConfigsHu',
                                ]
+                        l_s = []
                         if l_s:
                             l_node = self.__class__._parseProto(l_s, 'test')
                             for _node in l_node:
